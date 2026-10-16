@@ -73,6 +73,26 @@ function M.history(opts, ctx)
   end
 end
 
+---取当前选区起止行
+---注意：visual 模式下用 Lua 回调触发映射时，'< '> 标记尚未更新（恒为 0），
+---此时必须用 line("v")（选区锚点）与 line(".")（光标）取范围。
+---@return integer, integer
+local function visual_range()
+  local s, e
+  if vim.fn.mode():find("[vV\22]") then
+    s, e = vim.fn.line("v"), vim.fn.line(".")
+  else
+    s, e = vim.fn.line("'<"), vim.fn.line("'>")
+  end
+  if s == 0 or e == 0 then
+    s, e = vim.fn.line("."), vim.fn.line(".")
+  end
+  if s > e then
+    s, e = e, s
+  end
+  return s, e
+end
+
 ---入口：visual 选中若干行后调用，打开该区间的 line history
 function M.open()
   local file = vim.api.nvim_buf_get_name(0)
@@ -81,10 +101,10 @@ function M.open()
     return
   end
 
-  -- 视觉选区的起止行（映射触发时仍处 visual 模式，选区标记有效）
-  local s, e = vim.fn.line("'<"), vim.fn.line("'>")
-  if s > e then
-    s, e = e, s
+  local s, e = visual_range()
+  -- 退出 visual，避免 picker 打开时仍处于选区状态
+  if vim.fn.mode():find("[vV\22]") then
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
   end
 
   local cwd = Snacks.git.get_root(vim.fs.dirname(file)) or vim.fn.getcwd()
@@ -92,7 +112,6 @@ function M.open()
 
   Snacks.picker.pick({
     cwd = cwd,
-    source = "git_line_history",
     format = "git_log",
     preview = "git_show",
     confirm = "git_checkout",
