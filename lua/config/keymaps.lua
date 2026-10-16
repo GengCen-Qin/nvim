@@ -31,7 +31,11 @@ keymap("n", "<C-M-Left>", "<C-o>", { desc = "Jump back" })
 -- 对应 Sublime Text 的 "Jump Forward"
 keymap("n", "<C-M-Right>", "<C-i>", { desc = "Jump forward" })
 
--- 7. Ctrl + Enter: 向下插入一行并进入插入模式
+-- 7. Ctrl + d: 选中当前词并跳转到下一个同名匹配 (对应 Sublime Text 的 "Add Selection")
+-- * = 搜索当前词的下一个匹配，gn = 把该匹配选中为 visual。重复按 <C-d> 会顺次选中后续同名匹配
+keymap("n", "<C-d>", "*gn", { desc = "Select next occurrence of word (Ctrl+D)" })
+
+-- 8. Ctrl + Enter: 向下插入一行并进入插入模式
 -- 对应 Sublime Text 的 "Add Line Below"
 keymap("n", "<C-CR>", "o<Esc>k", { desc = "Insert line below and enter insert mode" })
 -- 解释：o 是向下新开一行并进入插入模式，<Esc>k 是为了确保光标停留在新行的开头（可选）
