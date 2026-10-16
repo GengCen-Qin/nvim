@@ -1,6 +1,6 @@
 return {
   "RRethy/vim-illuminate",
-  event = "LspAttach", -- 当 LSP 附加时加载
+  event = "LazyFile", -- 打开文件即加载，不依赖 LSP 附加
   config = function()
     require("illuminate").configure({
       providers = {
