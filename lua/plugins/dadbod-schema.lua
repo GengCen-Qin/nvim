@@ -1,9 +1,11 @@
 -- 数据库表结构快速查看（PostgreSQL / vim-dadbod）
 --
 --   <leader>fc   下拉选择 connection（跨重启记住）     对应 :DBTableSchema
---   <leader>fd   在当前选中的 connection 搜索表结构（等价 psql \d+）
---                  * 若已选中 connection：直接进表搜索
+--   <leader>fd   在当前选中的 connection 搜索对象（表/视图/物化视图/函数/过程）
+--                  * 列表统一展示（含对象类型），选了再取结构或源码
+--                  * 若已选中 connection：直接进搜索
 --                  * 若未选中过（或文件里没有记录）：先弹 connection 选择
+--                  * 表/视图/物化视图 -> 列结构；函数/过程 -> \sf 源码
 --   <leader>fq   新建一个 SQL buffer（filetype=sql，带 dadbod 补全）
 --                  * 自动绑定当前选中的 connection；未选中则先弹选择
 --                  * 在该 buffer 里 visual 选中 SQL，按 q 执行选中内容
@@ -117,45 +119,120 @@ return {
         vim.api.nvim_set_option_value("wrap", false, { win = 0 })
       end
 
-      -- 用 psql 执行 \d+ 取表结构
-      local function describe(conn, table_name)
+      -- 统一执行一条 psql 只读命令。raw=true 加 -tA（行结果便于解析，如对象列表、函数源码）；
+      -- 结构展示（\d+）不带 -tA，保留 psql 对齐表头。
+      local function run_psql(conn, sql, raw)
         local url = url_of(conn)
         if not url then
           vim.notify("未知连接: " .. conn, vim.log.levels.ERROR)
-          return
+          return nil
         end
         local canon = vim.fn["db#adapter#postgresql#canonicalize"](url)
+        local flags = raw and { "--no-psqlrc", "-tA" } or { "--no-psqlrc" }
         local cmd = vim.fn["db#adapter#postgresql#interactive"](
-          canon,
-          { "--no-psqlrc", "-c", '\\d+ "' .. table_name:gsub('"', '""') .. '"' }
+          canon, vim.list_extend(flags, { "-c", sql })
         )
-        local out = vim.fn["db#systemlist"](cmd)
-        if #out == 0 then
-          vim.notify("获取表结构失败: " .. table_name, vim.log.levels.ERROR)
-          return
-        end
-        show(out, conn .. "." .. table_name)
+        return vim.fn["db#systemlist"](cmd)
       end
 
-      -- 拉表名 -> 模糊选表 -> 展示结构
-      local function search_tables(conn)
-        local url = url_of(conn)
-        if not url then
-          vim.notify("未知连接: " .. conn, vim.log.levels.ERROR)
+      -- 用 psql 执行 \d+ 取对象（表/视图/物化视图）结构，视图会连带定义
+      local function describe(conn, schema, name)
+        local q = function(s)
+          return '"' .. s:gsub('"', '""') .. '"'
+        end
+        local out = run_psql(conn, '\\d+ ' .. q(schema) .. '.' .. q(name))
+        if not out or #out == 0 then
+          vim.notify("获取结构失败: " .. schema .. "." .. name, vim.log.levels.ERROR)
           return
         end
-        local canon = vim.fn["db#adapter#postgresql#canonicalize"](url)
-        vim.notify("正在获取 " .. conn .. " 的表列表...", vim.log.levels.INFO)
-        local tables = vim.fn["db#adapter#postgresql#tables"](canon)
-        if #tables == 0 then
-          vim.notify("未获取到表（连接失败或网络不通）: " .. conn, vim.log.levels.ERROR)
+        show(out, conn .. "." .. schema .. "." .. name)
+      end
+
+      -- 取函数/过程源码（等价 \sf，经 oid 精确取，避免重载歧义）
+      local function show_func(conn, oid, fqn)
+        local out = run_psql(conn, "SELECT pg_get_functiondef(" .. oid .. ");", true)
+        if not out or #out == 0 then
+          vim.notify("获取函数源码失败: " .. fqn, vim.log.levels.ERROR)
           return
         end
-        vim.ui.select(tables, {
-          prompt = string.format("[%s] 搜索表（共 %d 个）", conn, #tables),
+        show(out, conn .. "." .. fqn)
+      end
+
+      -- 拉取全部对象（表/视图/物化视图/函数/过程），统一模糊选择
+      local function search_objects(conn)
+        vim.notify("正在获取 " .. conn .. " 的对象列表...", vim.log.levels.INFO)
+        -- 关系对象：relkind r/p=表, v=视图, m=物化视图；忽略系统 schema 与 pg_ 前缀
+        local rels = run_psql(conn, [[
+          SELECT c.relkind::text || '|' || n.nspname || '|' || c.relname
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind IN ('r','p','v','m')
+            AND c.relname !~ '^pg_'
+            AND n.nspname !~ '^pg_'
+            AND n.nspname <> 'information_schema'
+          ORDER BY 1
+        ]], true) or {}
+        -- 函数/过程对象（带 oid 与参数签名，签名仅用于区分重载）
+        local funcs = run_psql(conn, [[
+          SELECT p.prokind::text || '|' || n.nspname || '|' || p.proname || '|' || p.oid::text
+                 || '|' || pg_get_function_identity_arguments(p.oid)
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.prokind IN ('f','p')
+            AND n.nspname !~ '^pg_'
+            AND n.nspname <> 'information_schema'
+          ORDER BY 1
+        ]], true) or {}
+
+        local kind_label = {
+          r = "table", p = "table", v = "view", m = "matview",
+          f = "function", p = "procedure",
+        }
+
+        -- items: {kind, fqn, schema, name, oid?}
+        local items = {}
+        for _, line in ipairs(rels) do
+          local k, s, n = line:match("^([rpvm])|([^|]+)|(.+)$")
+          if k then
+            items[#items + 1] = { kind = k, fqn = s .. "." .. n, schema = s, name = n }
+          end
+        end
+        -- 同名函数（重载）才追加参数签名，平时列表保持简洁
+        local overloaded = {}
+        local raw_funcs = {}
+        for _, line in ipairs(funcs) do
+          local k, s, n, oid, args = line:match("^([fp])|([^|]+)|([^|]+)|(%d+)|(.*)$")
+          if k then
+            local fqn = s .. "." .. n
+            overloaded[fqn] = (overloaded[fqn] or 0) + 1
+            raw_funcs[#raw_funcs + 1] = { kind = k, fqn = fqn, schema = s, name = n, oid = oid, args = args }
+          end
+        end
+        for _, it in ipairs(raw_funcs) do
+          if overloaded[it.fqn] > 1 and it.args ~= "" then
+            it.fqn = it.fqn .. "(" .. it.args .. ")"
+          end
+          items[#items + 1] = it
+        end
+
+        if #items == 0 then
+          vim.notify("未获取到对象（连接失败或网络不通）: " .. conn, vim.log.levels.ERROR)
+          return
+        end
+        vim.ui.select(items, {
+          prompt = string.format("[%s] 搜索对象（共 %d 个）", conn, #items),
+          format_item = function(it)
+            local label = kind_label[it.kind] or "?"
+            return string.format("%-9s %s", label, it.fqn)
+          end,
         }, function(choice)
-          if choice then
-            describe(conn, choice)
+          if not choice then
+            return
+          end
+          if choice.oid then
+            show_func(conn, choice.oid, choice.fqn)
+          else
+            describe(conn, choice.schema, choice.name)
           end
         end)
       end
@@ -165,13 +242,13 @@ return {
         pick_conn(function() end)
       end
 
-      -- <leader>fd: 在当前选中 connection 搜表；没选中过则先选 connection
+      -- <leader>fd: 在当前选中 connection 搜对象；没选中过则先选 connection
       local function schema_for_selected()
         local conn = load_saved()
         if conn then
-          search_tables(conn)
+          search_objects(conn)
         else
-          pick_conn(search_tables)
+          pick_conn(search_objects)
         end
       end
 
@@ -182,13 +259,16 @@ return {
         else
           choose_connection()
         end
-      end, { nargs = "?", complete = function(arg)
-        return vim.tbl_filter(function(n)
-          return n:find(arg, 1, true) == 1
-        end, conn_names())
-      end })
+      end, {
+        nargs = "?",
+        complete = function(arg)
+          return vim.tbl_filter(function(n)
+            return n:find(arg, 1, true) == 1
+          end, conn_names())
+        end,
+      })
 
-      vim.keymap.set("n", "<leader>fc", choose_connection, { desc = "DB: 选择连接" })
+      vim.keymap.set("n", "<leader>fs", choose_connection, { desc = "DB: 选择连接" })
       vim.keymap.set("n", "<leader>fd", schema_for_selected, { desc = "DB: 搜索表结构" })
 
       -- <leader>fq: 新建 SQL buffer，绑定当前选中 connection（带 dadbod 补全）
@@ -220,7 +300,11 @@ return {
         vim.keymap.set("x", "q", ":DB<CR>", { buffer = buf, desc = "DB: 执行选中 SQL" })
         vim.keymap.set("n", "q", ":%DB<CR>", { buffer = buf, desc = "DB: 执行整个 buffer" })
         vim.api.nvim_set_current_buf(buf)
-        vim.notify("SQL buffer（连接: " .. conn .. "），visual 选中按 q 执行", vim.log.levels.INFO, { title = "DB" })
+        vim.notify(
+          "SQL buffer（连接: " .. conn .. "），visual 选中按 q 执行",
+          vim.log.levels.INFO,
+          { title = "DB" }
+        )
       end
 
       local function new_sql_buffer()
