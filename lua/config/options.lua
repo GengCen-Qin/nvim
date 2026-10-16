@@ -21,3 +21,23 @@ vim.opt.sidescrolloff = 8
 -- 文件不存在时 vim.g.dbs 为空，dadbod 相关功能会提示未配置。
 local ok, dbs = pcall(dofile, vim.fn.stdpath("config") .. "/db_connections.lua")
 vim.g.dbs = (ok and type(dbs) == "table") and dbs or {}
+
+-- 设置初始缩放因子
+vim.g.neovide_scale_factor = 1.0
+
+-- 定义缩放函数
+local change_scale_factor = function(delta)
+  vim.g.neovide_scale_factor = vim.g.neovide_scale_factor * delta
+end
+
+-- 快捷键：Ctrl+= 放大，Ctrl+- 缩小
+vim.keymap.set("n", "<C-=>", function()
+  change_scale_factor(1.25)
+end)
+vim.keymap.set("n", "<C-->", function()
+  change_scale_factor(1 / 1.25)
+end)
+-- 重置快捷键
+vim.keymap.set("n", "<C-[>", function()
+  vim.g.neovide_scale_factor = 1.0
+end)
