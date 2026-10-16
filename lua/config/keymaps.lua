@@ -53,3 +53,29 @@ keymap("n", "u", "u", { desc = "Undo" })
 -- U: 反向撤回 (Redo)
 -- 注意：会覆盖 nvim 内置 U（撤销当前行）。若想保留内置 U，请注释此行。
 keymap("n", "U", "<C-r>", { desc = "Redo" })
+
+-- 9. 复制当前文件路径到系统剪贴板
+-- :CopyRelativePath 复制相对路径（相对 cwd，即 LazyVim 的 root/worktree）
+-- :CopyAbsolutePath 复制绝对路径
+local function copy_path(kind)
+  local path = vim.api.nvim_buf_get_name(0)
+  if path == "" then
+    vim.notify("当前 buffer 没有文件路径", vim.log.levels.WARN)
+    return
+  end
+
+  local abs = vim.fn.fnamemodify(path, ":p")
+  local text = kind == "relative" and vim.fn.fnamemodify(abs, ":.") or abs
+  -- 相对路径若落在 cwd 之外，fnamemodify 会原样返回绝对路径
+
+  vim.fn.setreg("+", text)
+  vim.notify("已复制" .. (kind == "relative" and "相对" or "绝对") .. "路径: " .. text)
+end
+
+vim.api.nvim_create_user_command("CopyRelativePath", function()
+  copy_path("relative")
+end, { desc = "复制当前文件相对路径到系统剪贴板" })
+
+vim.api.nvim_create_user_command("CopyAbsolutePath", function()
+  copy_path("absolute")
+end, { desc = "复制当前文件绝对路径到系统剪贴板" })
