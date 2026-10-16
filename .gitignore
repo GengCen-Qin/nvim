@@ -1,0 +1,16 @@
+tt.*
+.tests
+doc/tags
+debug
+.repro
+foo.*
+*.log
+data
+
+# 本地数据库连接（含明文密码），不要提交
+db_connections.lua
+
+# 编辑器备份文件
+*~
+*.swp
+*.swo

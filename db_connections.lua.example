@@ -1,0 +1,9 @@
+-- 数据库连接模板：复制本文件为 db_connections.lua 并填入你自己的连接。
+-- db_connections.lua 已被 .gitignore 忽略，不会提交到仓库。
+--
+-- 由 lua/config/options.lua 读取并赋值给 vim.g.dbs（vim-dadbod / vim-dadbod-ui 使用）。
+-- 密码中的特殊字符需百分号编码（+ -> %2B, * -> %2A, @ -> %40, : -> %3A）
+return {
+  -- 示例：
+  -- mydb = "postgresql://user:password@host:5432/dbname",
+}
