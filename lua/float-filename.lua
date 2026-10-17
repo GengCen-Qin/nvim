@@ -34,10 +34,10 @@ local function label(win)
   if name == "" then
     return (ft ~= "" and "[" .. ft .. "]" or "[No Name]"), nil, 0
   end
-  -- 相对 cwd 的路径；太长时从左侧截断，保留文件名部分
-  local rel = vim.fn.fnamemodify(name, ":.")
+  -- 只显示文件名（不含前面的路径）
+  local rel = vim.fn.fnamemodify(name, ":t")
   if vim.fn.strchars(rel) > max_width - 6 then
-    rel = "…" .. vim.fn.strcharpart(rel, vim.fn.strchars(rel) - (max_width - 7), max_width - 7)
+    rel = vim.fn.strcharpart(rel, 0, max_width - 7) .. "…"
   end
   local icon, hl = icon_for(name, ft)
   local mod = vim.bo[buf].modified and " ●" or ""
