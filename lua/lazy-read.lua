@@ -18,6 +18,10 @@
 --   * hash 用 sha256（nvim 没有 sha1）。line_text 才是主匹配键，hash 只在文本
 --     完全相同时才可能命中，故算法与 Sublime 的 sha1 不同也不影响两边互通。
 --   * notes.json 被外部改坏时只读不写，避免把用户已有注释覆盖掉。
+--   * 跨 worktree：注释额外带 repo_key = (git 公共目录 | 仓库内相对路径)，
+--     同一仓库的各个 worktree 共享该键，故写在公共代码上的注释在每个
+--     worktree 里都可见；只存在于某个 worktree 的文件天然不会串到别处。
+--     行号跨 worktree 常差很远，±radius 搜不到时退到全文件按内容定位。
 local M = {}
 
 local NS = vim.api.nvim_create_namespace("lazy_read")
@@ -83,6 +87,64 @@ local function normalize_path(path)
     return ""
   end
   return vim.fn.fnamemodify(vim.fn.expand(local_path), ":p")
+end
+
+-- ====================== git worktree 归属（跨 worktree 可见） ======================
+--
+-- 同一仓库的多个 worktree（如 PAS 主仓与 orca/workspaces/PAS/* 里的分支工作区）
+-- 共享同一个 git 目录，而同一文件在各 worktree 里的「相对仓库根路径」相同。
+-- 于是用 (git 公共目录, 相对路径) 作为跨 worktree 的稳定标识：公共代码上的注释
+-- 在任何 worktree 里都能命中；只存在于某个 worktree 的文件，别的 worktree 里
+-- 本来就没这个文件，自然也不会串。
+--
+-- 注释里的 file_path 仍是绝对路径（与 Sublime 版共用、可读性好），repo_key 只是
+-- 额外的匹配键；Sublime 版读到不认识的字段会原样保留，不受影响。
+local repo_cache = {}
+
+-- 返回 { common = git 公共目录, root = 本 worktree 根 }；不在 git 仓库里则 false
+local function repo_of(path)
+  local dir = vim.fn.fnamemodify(path, ":h")
+  local cached = repo_cache[dir]
+  if cached ~= nil then
+    return cached
+  end
+
+  local function git(arg)
+    local out = vim.fn.systemlist({ "git", "-C", dir, "rev-parse", "--path-format=absolute", arg })
+    if vim.v.shell_error ~= 0 or #out == 0 then
+      return nil
+    end
+    return out[1]
+  end
+
+  local common, root = git("--git-common-dir"), git("--show-toplevel")
+  local info = false
+  if common and root then
+    local c = vim.fn.fnamemodify(common, ":p"):gsub("/+$", "")
+    info = { common = c, root = vim.fn.fnamemodify(root, ":p") }
+  end
+  repo_cache[dir] = info
+  return info
+end
+
+-- "git公共目录|仓库内相对路径"，不在 git 仓库里返回 nil
+local function repo_key(path)
+  local info = repo_of(path)
+  if not info then
+    return nil
+  end
+  local abs = vim.fn.fnamemodify(path, ":p")
+  if abs:sub(1, #info.root) ~= info.root then
+    return nil
+  end
+  return info.common .. "|" .. abs:sub(#info.root + 1)
+end
+
+local function split_repo_key(key)
+  if type(key) ~= "string" then
+    return nil, nil
+  end
+  return key:match("^(.-)|(.+)$")
 end
 
 local function line_hash(text)
@@ -255,12 +317,44 @@ end
 local function notes_for_file(path, data)
   local out = {}
   local target = normalize_path(path)
+  local target_key = repo_key(target)
   for _, note in ipairs(data.notes or {}) do
     if normalize_path(note.file_path or "") == target then
+      out[#out + 1] = note
+    elseif target_key ~= nil and note.repo_key == target_key then
+      -- 同一个仓库的另一个 worktree 上写的注释（公共代码），这里也命中
       out[#out + 1] = note
     end
   end
   return out
+end
+
+-- 老注释没有 repo_key：文件还在的话补算一次并落盘，之后就能跨 worktree 共享。
+-- 每个会话只跑一次，git 结果按目录缓存，代价可忽略。
+local migrated_repo_keys = false
+local function migrate_repo_keys()
+  if migrated_repo_keys then
+    return
+  end
+  migrated_repo_keys = true
+
+  local data = load_data()
+  local changed = false
+  for _, note in ipairs(data.notes or {}) do
+    if note.repo_key == nil then
+      local file = to_local_path(note.file_path or "")
+      if file ~= "" and vim.fn.filereadable(file) == 1 then
+        local key = repo_key(file)
+        if key then
+          note.repo_key = key
+          changed = true
+        end
+      end
+    end
+  end
+  if changed then
+    save_data(data)
+  end
 end
 
 local function find_note(data, id)
@@ -309,7 +403,22 @@ local function resolve_note_row(buf, note)
   end
 
   if best_row == nil then
-    return nil, false
+    -- 跨 worktree 时行号通常差很多，±radius 搜不到：退到全文件按内容找。
+    -- 公共代码行文本相同，这足以定位；性能只在备注量少时触发，可接受。
+    for r = 0, last do
+      if note_matches_line(note, line_text(buf, r)) then
+        best_row = r
+        break
+      end
+    end
+    if best_row == nil then
+      return nil, false
+    end
+    note.line = best_row + 1
+    note.line_text = line_text(buf, best_row)
+    note.line_hash = line_hash(note.line_text)
+    note.updated_at = now()
+    return best_row, true
   end
 
   note.line = best_row + 1
@@ -347,6 +456,8 @@ function M.refresh(buf)
   if not vim.api.nvim_buf_is_valid(buf) then
     return
   end
+
+  migrate_repo_keys()
 
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
 
@@ -483,6 +594,9 @@ function M.add_or_edit()
       note.line_hash = line_hash(lt)
       note.note = text
       note.updated_at = ts
+      if note.repo_key == nil then
+        note.repo_key = repo_key(path)
+      end
     else
       note = {
         id = gen_id(),
@@ -491,6 +605,7 @@ function M.add_or_edit()
         line_text = lt,
         line_hash = line_hash(lt),
         note = text,
+        repo_key = repo_key(path),
         created_at = ts,
         updated_at = ts,
       }
@@ -578,9 +693,28 @@ end
 
 function M.jump(note)
   local path = to_local_path(note.file_path or "")
+
   if path == "" or vim.fn.filereadable(path) == 0 then
-    vim.notify("LazyRead: 文件不存在 " .. tostring(note.file_path), vim.log.levels.ERROR)
-    return
+    -- 原 worktree 可能已被删掉：按 repo_key 在当前 worktree / 主仓里找同名文件
+    local common, rel = split_repo_key(note.repo_key)
+    local current = buf_path(vim.api.nvim_get_current_buf())
+    local fallback
+    if rel and current then
+      local info = repo_of(current)
+      if info and info.common == common then
+        fallback = info.root .. rel
+      end
+      if (not fallback or vim.fn.filereadable(fallback) == 0) and common then
+        fallback = common:gsub("/%.git/$", "/") .. rel
+      end
+    end
+
+    if fallback and vim.fn.filereadable(fallback) == 1 then
+      path = fallback
+    else
+      vim.notify("LazyRead: 文件不存在 " .. tostring(note.file_path), vim.log.levels.ERROR)
+      return
+    end
   end
 
   vim.cmd.edit(vim.fn.fnameescape(path))
