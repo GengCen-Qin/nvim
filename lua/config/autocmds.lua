@@ -15,3 +15,7 @@ vim.api.nvim_create_autocmd("SwapExists", {
     vim.v.swapchoice = "e"
   end,
 })
+
+-- I18n 可见化：把 I18n.t('key') 的译文内联渲染在代码后面（默认 en），
+-- 光标落到那行时恢复原样。实现见 lua/i18n-preview.lua。
+require("i18n-preview").setup()
