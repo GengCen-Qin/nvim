@@ -271,18 +271,29 @@ return {
       vim.keymap.set("n", "<leader>fs", choose_connection, { desc = "DB: 选择连接" })
       vim.keymap.set("n", "<leader>fd", schema_for_selected, { desc = "DB: 搜索表结构" })
 
+      -- 给 SQL buffer 打上连接与执行键位（新建与复用都调用，确保 q 一定生效）
+      local function setup_sql_buffer(buf, conn)
+        local url = url_of(conn)
+        vim.b[buf].db = url
+        vim.b[buf].dadbod = url
+        vim.b[buf].db_query_temp = true
+        -- 在该 buffer 里：visual 选中按 q 执行选中；normal 下 q 执行整个 buffer
+        -- 注意必须用 ":"（而非 <cmd>）——<cmd> 不会更新 '< '> 可视标记
+        vim.keymap.set("x", "q", ":DB<CR>", { buffer = buf, desc = "DB: 执行选中 SQL" })
+        vim.keymap.set("n", "q", ":%DB<CR>", { buffer = buf, desc = "DB: 执行整个 buffer" })
+      end
+
       -- <leader>fq: 新建 SQL buffer，绑定当前选中 connection（带 dadbod 补全）
       local function open_sql_buffer(conn)
         local dir = vim.fn.stdpath("data") .. "/db_queries"
         vim.fn.mkdir(dir, "p")
         local name = dir .. "/" .. conn .. ".sql"
 
-        -- 已存在同名 buffer 就直接切过去，避免重复创建
+        -- 已存在同名 buffer 就直接切过去（复用也补上键位，防止旧 buffer 缺映射）
         local existing = vim.fn.bufnr(name)
         if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
+          setup_sql_buffer(existing, conn)
           vim.api.nvim_set_current_buf(existing)
-          vim.b[existing].db = url_of(conn)
-          vim.b[existing].dadbod = url_of(conn)
           return
         end
 
@@ -290,15 +301,9 @@ return {
         local buf = vim.api.nvim_create_buf(true, false)
         vim.bo[buf].filetype = "sql"
         vim.bo[buf].swapfile = false
-        -- 让 dadbod 补全与 :DB 都知道用哪个连接（必须写到目标 buffer 上）
-        local url = url_of(conn)
-        vim.b[buf].db = url
-        vim.b[buf].dadbod = url
+        -- 标记为临时查询 buffer：不参与 auto-save.nvim 自动保存
         pcall(vim.api.nvim_buf_set_name, buf, name)
-        -- 在该 buffer 里：visual 选中按 q 执行选中；normal 下 q 执行整个 buffer
-        -- 注意必须用 ":"（而非 <cmd>）——<cmd> 不会更新 '< '> 可视标记
-        vim.keymap.set("x", "q", ":DB<CR>", { buffer = buf, desc = "DB: 执行选中 SQL" })
-        vim.keymap.set("n", "q", ":%DB<CR>", { buffer = buf, desc = "DB: 执行整个 buffer" })
+        setup_sql_buffer(buf, conn)
         vim.api.nvim_set_current_buf(buf)
         vim.notify(
           "SQL buffer（连接: " .. conn .. "），visual 选中按 q 执行",

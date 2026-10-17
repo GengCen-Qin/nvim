@@ -12,6 +12,12 @@ vim.opt.breakindent = true -- 换行后保持缩进，看起来更整齐
 vim.opt.scrolloff = 8
 vim.opt.sidescrolloff = 8
 
+-- 关闭 nvim 内置 sqlcomplete 的默认按键映射（<Left>/<Right> 会绑到
+-- sqlcomplete#DrillIntoTable 等函数；这东西被 LazyVim 以 g:loaded_sql_completion=true
+-- 屏蔽后函数不存在，一按左右就报 E117。这里直接用官方开关去掉整套默认映射，
+-- 数据库补全交给 vim-dadbod-completion/blink）。
+vim.g.omni_sql_no_default_maps = true
+
 -- 数据库连接（vim-dadbod / vim-dadbod-ui）
 -- 格式: postgresql://user:password@host:port/database
 -- 密码中的特殊字符需百分号编码（+ -> %2B, * -> %2A）
