@@ -48,6 +48,23 @@ local function is_normal_win(win)
   return vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_config(win).relative == ""
 end
 
+-- nvim-treesitter-context 把「当前类/函数」固定在窗口顶部（relative=win, row=0，
+-- zindex 默认 20，横跨整行），会盖住贴在同一位置的悬浮文件名。它给自己的浮窗打了
+-- w:treesitter_context 标记，这里据此算出它占用的行数，把文件名浮窗挪到它下方。
+local function context_offset(win)
+  local offset = 0
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if w ~= win and vim.api.nvim_win_is_valid(w) then
+      local cfg = vim.api.nvim_win_get_config(w)
+      if cfg.relative == "win" and cfg.win == win and vim.w[w].treesitter_context then
+        -- 上下文浮窗固定顶在 row=0，底边即 row + height
+        offset = math.max(offset, (cfg.row or 0) + (cfg.height or 0))
+      end
+    end
+  end
+  return offset
+end
+
 local function close(win)
   local f = floats[win]
   if not f then
@@ -79,6 +96,8 @@ function M.refresh(win)
   local text, hl, icon_len = label(win)
   local width = vim.api.nvim_strwidth(text) + 2
   local win_width = vim.api.nvim_win_get_width(win)
+  -- 有 treesitter-context 固定在顶部时下移，避免被盖住
+  local top = context_offset(win)
   if win_width < 30 or width > win_width - 2 then
     close(win)
     return
@@ -92,7 +111,7 @@ function M.refresh(win)
       relative = "win",
       win = win,
       anchor = "NE",
-      row = 0,
+      row = top,
       col = win_width - 1,
       width = width,
       height = 1,
@@ -100,23 +119,24 @@ function M.refresh(win)
       border = "rounded",
       focusable = false,
       noautocmd = true,
-      -- 低于其他浮窗（默认 50），这样 lazy / picker / which-key 弹出时会盖住它
-      zindex = 1,
+      -- 高于 treesitter-context 的浮窗（默认 20），低于 lazy / picker / which-key
+      -- 等常规浮窗（默认 50）：这样既不会被上下文固定行盖住，也不会盖住这些 UI
+      zindex = 25,
     })
     vim.wo[fwin].winblend = 25
     vim.wo[fwin].wrap = false
-    f = { win = fwin, buf = buf, text = nil, col = nil, width = nil }
+    f = { win = fwin, buf = buf, text = nil, col = nil, width = nil, top = nil }
     floats[win] = f
   end
 
   -- 位置/尺寸随窗口变化重设（没变就不动，避免滚动时反复重设）
-  if f.col ~= win_width - 1 or f.width ~= width then
-    f.col, f.width = win_width - 1, width
+  if f.col ~= win_width - 1 or f.width ~= width or f.top ~= top then
+    f.col, f.width, f.top = win_width - 1, width, top
     vim.api.nvim_win_set_config(f.win, {
       relative = "win",
       win = win,
       anchor = "NE",
-      row = 0,
+      row = top,
       col = f.col,
       width = width,
       height = 1,
@@ -162,6 +182,8 @@ function M.setup()
     "BufModifiedSet",
     "TextChanged",
     "TextChangedI",
+    "CursorMoved",
+    "CursorMovedI",
     "WinEnter",
     "WinNew",
     "TabEnter",
@@ -173,6 +195,13 @@ function M.setup()
       M.refresh(vim.api.nvim_get_current_win())
       if args.event == "VimResized" or args.event == "TabEnter" then
         refresh_all()
+      end
+      if args.event == "CursorMoved" or args.event == "CursorMovedI" then
+        -- treesitter-context 的上下文高度是异步(~150ms)更新的，光标移动后延迟
+        -- 复检一次，让位置最终落到上下文下方。
+        vim.defer_fn(function()
+          M.refresh(vim.api.nvim_get_current_win())
+        end, 200)
       end
     end,
   })
