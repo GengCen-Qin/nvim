@@ -10,6 +10,10 @@ vim.opt.wrap = true -- 允许长行自动换行
 -- 长连续内容也会硬折行；配合 breakindent 折行后仍缩进对齐。
 vim.opt.linebreak = false
 vim.opt.breakindent = true -- 换行后保持缩进，看起来更整齐
+-- 续行再额外缩进 2 位(在 breakindent 对齐基础上)，方便识别同一逻辑行
+vim.opt.breakindentopt = "shift:2"
+-- 续行行首加一个标记 ↳，一眼看出是折行下来的
+vim.opt.showbreak = "↳ "
 
 -- 光标离窗口上下/左右边缘的留白（滚动到尽头时保留的余量行/列数）
 vim.opt.scrolloff = 8
