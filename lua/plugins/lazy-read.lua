@@ -4,7 +4,7 @@
 --   cc          当前行添加 / 编辑注释（弹输入框，回车保存）
 --   cv          浮窗查看当前行注释的完整内容
 --   <leader>cf  搜索所有注释（snacks picker，回车跳转）
---   <leader>cD  删除当前行注释
+--   <leader>cd  删除当前行注释
 --   <leader>ct  显示 / 隐藏行尾注释预览
 --
 -- 数据与 Sublime 版共用 ~/.lazyRead/notes.json，两边互相可见；
@@ -46,7 +46,7 @@ return {
         desc = "LazyRead: 搜索注释",
       },
       {
-        "<leader>cD",
+        "<leader>cd",
         function()
           require("lazy-read").delete()
         end,
