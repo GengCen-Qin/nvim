@@ -4,6 +4,7 @@
 --   cc          当前行添加 / 编辑注释（弹输入框，回车保存；已有注释则预填）
 --   cv          浮窗查看当前行注释的完整内容
 --   <leader>cf  搜索所有注释（snacks picker，回车跳转）
+--   <leader>fc  同上（别名）
 --   <leader>cd  删除当前行注释
 --   <leader>ct  显示 / 隐藏行尾注释预览
 --
@@ -662,11 +663,7 @@ function M.delete()
     return
   end
 
-  local choice = vim.fn.confirm("删除这一行的 LazyRead 注释？\n\n" .. summary_of(note), "&删除\n&取消", 2)
-  if choice ~= 1 then
-    return
-  end
-
+  -- 不再弹确认框：按这个键本身就是确认动作
   local kept = {}
   for _, item in ipairs(data.notes or {}) do
     if item.id ~= note.id then
