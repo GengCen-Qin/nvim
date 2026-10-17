@@ -5,7 +5,10 @@
 --
 vim.opt.guifont = "Maple Mono NF CN:h16"
 vim.opt.wrap = true -- 允许长行自动换行
-vim.opt.linebreak = true -- 在单词边界处换行，而不是切断单词
+-- 关闭 linebreak：它只在单词边界(空格/标点)折行，遇到超长 URL/base64/连续
+-- 字符串这种无空格内容时整行不折、横向滚动，看起来像 wrap 失效。关掉后
+-- 长连续内容也会硬折行；配合 breakindent 折行后仍缩进对齐。
+vim.opt.linebreak = false
 vim.opt.breakindent = true -- 换行后保持缩进，看起来更整齐
 
 -- 光标离窗口上下/左右边缘的留白（滚动到尽头时保留的余量行/列数）
