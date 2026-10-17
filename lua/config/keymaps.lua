@@ -45,8 +45,8 @@ keymap("n", "<C-CR>", "o<Esc>k", { desc = "Insert line below and enter insert mo
 --
 --
 
--- Ctrl + Shift + F: 全局搜索 (使用 Telescope 的 live_grep)
-keymap("n", "<C-S-f>", "<cmd>Telescope live_grep<cr>", { desc = "Global Search (Live Grep)" })
+-- space + /: 全局搜索 (live_grep)，比 LazyVim 默认的 <leader>sg 少按一次
+keymap("n", "<leader>/", "<cmd>Telescope live_grep<cr>", { desc = "Global Search (Live Grep)" })
 
 -- u: 撤回 (Undo) —— nvim 内置，明示意图
 keymap("n", "u", "u", { desc = "Undo" })
