@@ -31,9 +31,10 @@ keymap("n", "<C-M-Left>", "<C-o>", { desc = "Jump back" })
 -- 对应 Sublime Text 的 "Jump Forward"
 keymap("n", "<C-M-Right>", "<C-i>", { desc = "Jump forward" })
 
--- 7. Ctrl + d: 选中当前词并跳转到下一个同名匹配 (对应 Sublime Text 的 "Add Selection")
--- * = 搜索当前词的下一个匹配，gn = 把该匹配选中为 visual。重复按 <C-d> 会顺次选中后续同名匹配
-keymap("n", "<C-d>", "*gn", { desc = "Select next occurrence of word (Ctrl+D)" })
+-- 7. space + n: 搜索光标下的单词并跳转到下一个匹配位置
+-- * = 用光标下的单词作为搜索词（高亮全部匹配）并跳到下一个，之后用 n / N 继续前后查找
+-- 注意：覆盖了 LazyVim 默认的 <leader>n（通知历史），需要通知历史用 :messages
+keymap("n", "<leader>n", "*", { desc = "Search word under cursor & jump to next (then n/N)" })
 
 -- 8. Ctrl + Enter: 向下插入一行并进入插入模式
 -- 对应 Sublime Text 的 "Add Line Below"
@@ -79,3 +80,16 @@ end, { desc = "复制当前文件相对路径到系统剪贴板" })
 vim.api.nvim_create_user_command("CopyAbsolutePath", function()
   copy_path("absolute")
 end, { desc = "复制当前文件绝对路径到系统剪贴板" })
+
+-- 注意：<leader>cr / <leader>ca 原本被 LSP 占用（Rename / Code Action），这里按需求覆盖为复制路径
+keymap("n", "<leader>cr", "<cmd>CopyRelativePath<CR>", { desc = "Copy relative path" })
+keymap("n", "<leader>ca", "<cmd>CopyAbsolutePath<CR>", { desc = "Copy absolute path" })
+
+-- LazyVim 在 LspAttach 时用 buffer 局部键位设了 <leader>cr(Rename)/<leader>ca(Code Action)，
+-- 会盖掉上面的全局绑定。本文件在 VeryLazy 加载，注册的 autocmd 晚于 LazyVim，故在其之后生效。
+vim.api.nvim_create_autocmd("LspAttach", {
+  callback = function(args)
+    keymap("n", "<leader>cr", "<cmd>CopyRelativePath<CR>", { buffer = args.buf, desc = "Copy relative path" })
+    keymap("n", "<leader>ca", "<cmd>CopyAbsolutePath<CR>", { buffer = args.buf, desc = "Copy absolute path" })
+  end,
+})
