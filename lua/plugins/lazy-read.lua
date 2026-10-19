@@ -4,7 +4,6 @@
 --   cc          当前行添加 / 编辑注释（弹输入框，回车保存）
 --   cv          浮窗查看当前行注释的完整内容
 --   <leader>cf  搜索所有注释（snacks picker，回车跳转）
---   <leader>fc  同上（别名）
 --   <leader>cd  删除当前行注释
 --   <leader>ct  显示 / 隐藏行尾注释预览
 --
@@ -41,13 +40,6 @@ return {
       },
       {
         "<leader>cf",
-        function()
-          require("lazy-read").search()
-        end,
-        desc = "LazyRead: 搜索注释",
-      },
-      {
-        "<leader>fc",
         function()
           require("lazy-read").search()
         end,
