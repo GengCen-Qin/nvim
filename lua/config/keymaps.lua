@@ -9,6 +9,9 @@ local keymap = vim.keymap.set
 -- 注意：在 Vim 中 <C-w> 默认是窗口操作前缀，这里我们将其映射为关闭当前 buffer
 keymap("n", "<C-w>", "<cmd>bdelete<CR>", { desc = "Close current buffer" })
 
+-- 1.1. space + w + w: 关闭当前 Buffer
+keymap("n", "<leader>ww", "<cmd>bdelete<CR>", { desc = "Close current buffer" })
+
 -- 2. Ctrl + c: 复制 (系统剪贴板)
 -- 使用 "+y 复制到系统剪贴板，这样你可以粘贴到浏览器或其他软件
 keymap("v", "<C-c>", '"+y', { desc = "Copy to system clipboard" })
