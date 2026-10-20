@@ -710,6 +710,22 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           buffer = buf, desc = "DB: 悬浮查看对象结构" })
       end
 
+      -- 实时写盘：查询文件很小，改动即保存，避免 bdelete/<C-w> 退出时反复问是否保存。
+      -- 单独负责（不走 auto-save 节流），因为它是临时查询 buffer。
+      -- 用 write! 强制覆盖：buffer 是新建的、没走过 read，否则每次都会问「Overwrite existing file?」。
+      local function auto_write_sql(buf)
+        vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "InsertLeave" }, {
+          buffer = buf,
+          callback = function()
+            if vim.bo[buf].modified then
+              pcall(vim.api.nvim_buf_call, buf, function()
+                vim.cmd("silent! write!")
+              end)
+            end
+          end,
+        })
+      end
+
       -- <leader>fq: 新建 SQL buffer，绑定当前选中 connection（带 dadbod 补全）
       local function open_sql_buffer(conn)
         local dir = vim.fn.stdpath("data") .. "/db_queries"
@@ -720,17 +736,20 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         local existing = vim.fn.bufnr(name)
         if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
           setup_sql_buffer(existing, conn)
+          auto_write_sql(existing)
           vim.api.nvim_set_current_buf(existing)
           return
         end
 
-        -- 普通可编辑 buffer（非 scratch）：可以 :w 存盘，切走再回来内容还在
-        local buf = vim.api.nvim_create_buf(true, false)
+        -- 可编辑文件 buffer：带文件名才能落盘。用 bufadd+bufload 读入已有文件，
+        -- 否则新 buffer 是空的，一保存就把上次写的 SQL 冲掉。
+        local buf = vim.fn.bufadd(name)
+        vim.fn.bufload(buf)
         vim.bo[buf].filetype = "sql"
         vim.bo[buf].swapfile = false
         -- 标记为临时查询 buffer：不参与 auto-save.nvim 自动保存
-        pcall(vim.api.nvim_buf_set_name, buf, name)
         setup_sql_buffer(buf, conn)
+        auto_write_sql(buf)
         vim.api.nvim_set_current_buf(buf)
         vim.notify(
           "SQL buffer（连接: " .. conn .. "），visual 选中按 q 执行",
