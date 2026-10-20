@@ -11,6 +11,10 @@ local WINSEPARATOR_FG = "#f4b8e4" -- catppuccin pink
 -- 改这里即可换成别的字符，如 "┃"(粗竖线) / "▏"(细右半块)。宽度固定 1 列，主题需要支持宽字符。
 local WINSEPARATOR_VERT = "▌"
 
+-- 全局背景色（改这里即可调整色值）
+-- 默认覆盖 catppuccin-frappe 的 base(#303446)，换成偏蓝灰的 #303841。
+local BG = "#303841"
+
 vim.api.nvim_create_autocmd("ColorScheme", {
   group = vim.api.nvim_create_augroup("UserCommentColor", { clear = true }),
   callback = function()
@@ -29,6 +33,11 @@ vim.api.nvim_create_autocmd("ColorScheme", {
     end
 
     vim.api.nvim_set_hl(0, "WinSeparator", { fg = WINSEPARATOR_FG, bold = true })
+
+    -- 覆盖整体背景色
+    for _, group in ipairs({ "Normal", "NormalFloat", "NormalNC" }) do
+      vim.api.nvim_set_hl(0, group, { bg = BG })
+    end
 
     -- fillchars 的 vert 控制竖直分隔线用什么字符；它在 options 里也会被设置，
     -- 这里放在 ColorScheme 里再设一遍，保证换主题后依然是加粗的 ▌。
