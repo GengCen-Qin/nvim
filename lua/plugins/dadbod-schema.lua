@@ -6,12 +6,28 @@
 --                  * 若已选中 connection：直接进搜索
 --                  * 若未选中过（或文件里没有记录）：先弹 connection 选择
 --                  * 表/视图/物化视图 -> 列结构；函数/过程 -> \sf 源码
+--                  * 永远走本地(非TP)连接，TP 连接会按名字映射到本地对应连接
 --   <leader>fq   新建一个 SQL buffer（filetype=sql，带 dadbod 补全）
 --                  * 自动绑定当前选中的 connection；未选中则先弹选择
 --                  * 在该 buffer 里 visual 选中 SQL，按 q 执行选中内容
+--                  * 双线路：补全走本地(非TP)连接(快)；执行走选中的连接(可能 TP)
+--                  * normal 模式 K：悬浮展示光标下单词的结构（表/视图/函数），
+--                    q 或 Esc 关闭，回到 SQL buffer
+--
+-- 表/视图结构默认只显示 Column / Type / Nullable / Default / Comment 五列；
+-- 想换成别的列，设 vim.g.db_schema_columns（见文件内 schema_field_expr 的可用字段）。
+--
+-- 字段补全说明：vim-dadbod-completion 只在整库列数 <= 10000 时才加载全局列名，
+-- 本地 pas 库有 13669 列，全局列名这条路永久不可用；因此靠"跟住当前 FROM/JOIN
+-- 的表"设 b:db_table 走按表补全，不带表名前缀也能补出字段。
 --
 -- 连接来自 vim.g.dbs（见 lua/config/options.lua）。
 -- 选中结果写入 XDG 数据目录，重启 nvim 后仍记住上次选的 connection。
+--
+-- 本地(非TP)连接映射规则（local_conn_of）：tp_xxx -> xxx，
+-- tp_pas_2/3/4 去掉 _数字 后缀落回 pas；本就是非TP则原样使用；
+-- 映射不到则补全回退到选中连接并给出 WARN 提示。
+-- 想直接查 TP 的结构（绕过映射）用 :DBTableSchema <连接名>。
 return {
   {
     -- tpope/vim-dadbod 为纯 autoload 插件，常驻开销极小；
@@ -27,6 +43,19 @@ return {
       -- 连接名 -> URL
       local function url_of(conn)
         return conn and vim.g.dbs and vim.g.dbs[conn] or nil
+      end
+
+      -- 连接名 -> 本地(非TP)连接名：tp_xxx -> 本地 xxx，tp_pas_2/3/4 去掉 _数字 落回 pas。
+      -- 本就是非TP则原样返回；映射不到返回 nil（调用方回退到原连接）。
+      local function local_conn_of(conn)
+        if not (conn and vim.g.dbs) then
+          return conn
+        end
+        local base = conn
+        if base:sub(1, 3) == "tp_" then
+          base = base:gsub("^tp_", ""):gsub("_%d+$", "")
+        end
+        return vim.g.dbs[base] and base or nil
       end
 
       local function conn_names()
@@ -135,17 +164,143 @@ return {
         return vim.fn["db#systemlist"](cmd)
       end
 
-      -- 用 psql 执行 \d+ 取对象（表/视图/物化视图）结构，视图会连带定义
-      local function describe(conn, schema, name)
-        local q = function(s)
-          return '"' .. s:gsub('"', '""') .. '"'
+      -- 用悬浮窗展示结构（K 键用，看完 Esc 关闭回到 SQL buffer）
+      -- 注意：这里不能用 nvim_buf_call 包裹——它会在回调返回时把当前窗口还原回
+      -- SQL 窗口，导致浮窗拿不到焦点、Esc 落到 SQL buffer 上关不掉浮窗。
+      local function show_float(lines, title)
+        local width = math.min(120, math.max(60, vim.o.columns - 4))
+        local height = math.min(vim.o.lines - 8, #lines + 2)
+        local buf = vim.api.nvim_create_buf(false, true)
+        vim.bo[buf].bufhidden = "wipe"
+        vim.bo[buf].swapfile = false
+        vim.bo[buf].filetype = "sql"
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        pcall(vim.api.nvim_buf_set_name, buf, "db-float://" .. title)
+        local win = vim.api.nvim_open_win(buf, true, {
+          relative = "cursor",
+          width = width,
+          height = height,
+          col = 0,
+          row = 1,
+          style = "minimal",
+          border = "rounded",
+          title = " " .. title .. " ",
+          title_pos = "center",
+        })
+        vim.wo[win].wrap = false
+        -- Esc / q 关闭浮窗（焦点随之回到 SQL 窗口）；浮窗只读，不需要其它键
+        local close = function()
+          if vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_close(win, true)
+          end
         end
-        local out = run_psql(conn, '\\d+ ' .. q(schema) .. '.' .. q(name))
+        vim.keymap.set("n", "<Esc>", close, { buffer = buf, desc = "关闭" })
+        vim.keymap.set("n", "q", close, { buffer = buf, desc = "关闭" })
+        -- 兜底：窗口被别的途径切走/关闭时一并收掉
+        vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
+          buffer = buf,
+          once = true,
+          callback = function()
+            if vim.api.nvim_win_is_valid(win) and vim.api.nvim_get_current_win() ~= win then
+              vim.api.nvim_win_close(win, true)
+            end
+          end,
+        })
+      end
+
+      -- 表/视图结构要展示哪些列（顺序即展示顺序）。
+      -- 改这里，或在配置里设 vim.g.db_schema_columns 覆盖，例如只要三列：
+      --   vim.g.db_schema_columns = { "Column", "Type", "Comment" }
+      -- 可选：Column / Type / Nullable / Default / Comment / Collation / Storage / Stats
+      local schema_field_expr = {
+        Column = "a.attname",
+        Type = "format_type(a.atttypid, a.atttypmod)",
+        Nullable = "CASE WHEN a.attnotnull THEN 'not null' ELSE '' END",
+        Default = "pg_get_expr(d.adbin, d.adrelid)",
+        Comment = "col_description(a.attrelid, a.attnum)",
+        Collation = "CASE WHEN a.attcollation <> t.typcollation THEN cl.collname END",
+        Storage = "CASE a.attstorage"
+          .. " WHEN 'p' THEN 'plain' WHEN 'e' THEN 'external'"
+          .. " WHEN 'm' THEN 'main' WHEN 'x' THEN 'extended' END",
+        Stats = "CASE WHEN a.attstattarget < 0 THEN '' ELSE a.attstattarget::text END",
+      }
+      local default_schema_columns = { "Column", "Type", "Nullable", "Default", "Comment" }
+
+      local function quote_ident(s)
+        return '"' .. s:gsub('"', '""') .. '"'
+      end
+
+      -- 按配置的列拼列结构查询；psql 对齐输出，不用自己排版。
+      local function relation_schema_sql(schema, name)
+        local want = vim.g.db_schema_columns or default_schema_columns
+        local sel = {}
+        for _, field in ipairs(want) do
+          local expr = schema_field_expr[field]
+          if expr then
+            sel[#sel + 1] = string.format('%s AS %s', expr, quote_ident(field))
+          end
+        end
+        if #sel == 0 then
+          return nil
+        end
+        local fqn = quote_ident(schema) .. "." .. quote_ident(name)
+        return string.format([[
+SELECT %s
+FROM pg_attribute a
+LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+LEFT JOIN pg_type t ON t.oid = a.atttypid
+LEFT JOIN pg_collation cl ON cl.oid = a.attcollation
+WHERE a.attrelid = '%s'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
+      end
+
+      -- 取表/视图的列结构；视图/物化视图再附上定义（否则看不出视图是什么）。失败返回 nil。
+      local function relation_body(conn, schema, name, kind)
+        local sql = relation_schema_sql(schema, name)
+        if not sql then
+          vim.notify(
+            "vim.g.db_schema_columns 里没有可用的列名",
+            vim.log.levels.WARN,
+            { title = "DB" }
+          )
+          return nil
+        end
+        local out = run_psql(conn, sql)
         if not out or #out == 0 then
+          return nil
+        end
+        if kind ~= "v" and kind ~= "m" then
+          return out
+        end
+        local fqn = quote_ident(schema) .. "." .. quote_ident(name)
+        local def = run_psql(conn, "SELECT pg_get_viewdef('" .. fqn .. "'::regclass, true);", true)
+        if not def or #def == 0 then
+          return out
+        end
+        local body = {}
+        for _, line in ipairs(out) do
+          body[#body + 1] = line
+        end
+        body[#body + 1] = ""
+        body[#body + 1] = "-- 视图定义:"
+        vim.list_extend(body, def)
+        return body
+      end
+
+      -- 展示表/视图结构。target_buf 给定时用悬浮窗（K 键，不替换当前 buffer），
+      -- 否则占用当前窗口（<leader>fd）。
+      local function describe(conn, schema, name, target_buf, kind)
+        local body = relation_body(conn, schema, name, kind)
+        if not body then
           vim.notify("获取结构失败: " .. schema .. "." .. name, vim.log.levels.ERROR)
           return
         end
-        show(out, conn .. "." .. schema .. "." .. name)
+        local title = conn .. "." .. schema .. "." .. name
+        if target_buf then
+          show_float(body, title)
+        else
+          show(body, title)
+        end
       end
 
       -- 取函数/过程源码（等价 \sf，经 oid 精确取，避免重载歧义）
@@ -156,6 +311,134 @@ return {
           return
         end
         show(out, conn .. "." .. fqn)
+      end
+
+      -- 按名字查对象类型（表/视图/物化视图/函数/过程），走本地连接。
+      -- 结果按 (conn, name) 缓存，同一对象反复 K 不再查库。
+      local obj_cache = {}
+      local kind_label = {
+        r = "table", p = "table", v = "view", m = "matview",
+        f = "function", d = "procedure",
+      }
+
+      -- 已知表名集合（每连接缓存一次），用于判断"这个表名已经打完整了"
+      local tables_cache = {}
+      local function known_table(conn, name)
+        local set = tables_cache[conn]
+        if not set then
+          local url = url_of(conn)
+          if not url then
+            return false
+          end
+          local ok, list = pcall(vim.fn["db#adapter#call"], url, "tables", { url }, {})
+          set = {}
+          if ok then
+            for _, n in ipairs(list or {}) do
+              set[n] = true
+            end
+          end
+          tables_cache[conn] = set
+        end
+        return set[name] == true
+      end
+
+      local function lookup_object(conn, name)
+        obj_cache[conn] = obj_cache[conn] or {}
+        local cached = obj_cache[conn][name]
+        if cached ~= nil then
+          return cached ~= false and cached or nil
+        end
+        local esc = name:gsub("'", "''")
+        local sql = string.format([[
+          SELECT 'rel|' || c.relkind::text || '|' || n.nspname || '|' || c.relname
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relname = '%s' AND c.relkind IN ('r','p','v','m')
+            AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+          UNION ALL
+          SELECT 'fn|' || p.prokind::text || '|' || n.nspname || '|' || p.proname
+                 || '|' || p.oid::text
+          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = '%s'
+            AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+        ]], esc, esc)
+        local out = run_psql(conn, sql, true) or {}
+        local found = {}
+        for _, line in ipairs(out) do
+          local t, k, sc, nm, oid = line:match("^(%a+)|([%a]+)|([^|]+)|([^|]+)|?(%d*)$")
+          if t then
+            -- 关系 p(分区表)=table；函数 prokind p=procedure，用 d 区分
+            local kind = k
+            if t == "fn" and k == "p" then
+              kind = "d"
+            end
+            found[#found + 1] = { kind = kind, schema = sc, name = nm, oid = oid ~= "" and oid or nil }
+          end
+        end
+        -- 同名对象优先取 public schema，其次关系对象（表/视图）优先于函数
+        table.sort(found, function(a, b)
+          local ap, bp = a.schema == "public", b.schema == "public"
+          if ap ~= bp then
+            return ap
+          end
+          return (a.oid == nil) and not (b.oid == nil)
+        end)
+        local result = found[1] or false
+        obj_cache[conn][name] = result
+        return result or nil
+      end
+
+      -- K 键：判断光标下单词是表/视图/函数，悬浮展示结构（走本地连接）
+      local function hover_object()
+        local conn = vim.b.db_comp_conn or load_saved()
+        if not conn then
+          vim.notify("未选择数据库连接", vim.log.levels.WARN, { title = "DB" })
+          return
+        end
+        local word = vim.fn.expand("<cword>")
+        if word == "" then
+          return
+        end
+        local obj = lookup_object(conn, word)
+        if not obj then
+          vim.notify("未找到对象: " .. word, vim.log.levels.WARN, { title = "DB" })
+          return
+        end
+        local label = kind_label[obj.kind] or "?"
+        local title = string.format("%s %s.%s", label, obj.schema, obj.name)
+        if obj.oid then
+          -- 函数/过程：展示签名 + 源码
+          local out = run_psql(conn, "SELECT pg_get_functiondef(" .. obj.oid .. ");", true) or {}
+          if #out == 0 then
+            vim.notify("获取函数源码失败: " .. obj.name, vim.log.levels.ERROR)
+            return
+          end
+          -- 同名重载：在标题里提示数量
+          local sig = run_psql(conn, string.format(
+            "SELECT pg_get_function_identity_arguments(p.oid) FROM pg_proc p "
+              .. "JOIN pg_namespace n ON n.oid = p.pronamespace "
+              .. "WHERE p.proname = '%s' AND n.nspname = '%s'",
+            obj.name:gsub("'", "''"), obj.schema:gsub("'", "''")
+          ), true) or {}
+          local body = out
+          if #sig > 1 then
+            title = string.format("%s %s.%s (%d 个重载)", label, obj.schema, obj.name, #sig)
+            body = { "-- 重载签名:" }
+            for _, s in ipairs(sig) do
+              body[#body + 1] = "--   " .. obj.name .. "(" .. s .. ")"
+            end
+            body[#body + 1] = ""
+            vim.list_extend(body, out)
+          end
+          show_float(body, title)
+        else
+          -- 表/视图/物化视图：按配置的列展示（Column/Type/Nullable/Default/Comment…）
+          local body = relation_body(conn, obj.schema, obj.name, obj.kind)
+          if not body then
+            vim.notify("获取结构失败: " .. obj.name, vim.log.levels.ERROR)
+            return
+          end
+          show_float(body, title)
+        end
       end
 
       -- 拉取全部对象（表/视图/物化视图/函数/过程），统一模糊选择
@@ -232,7 +515,7 @@ return {
           if choice.oid then
             show_func(conn, choice.oid, choice.fqn)
           else
-            describe(conn, choice.schema, choice.name)
+            describe(conn, choice.schema, choice.name, nil, choice.kind)
           end
         end)
       end
@@ -242,20 +525,23 @@ return {
         pick_conn(function() end)
       end
 
-      -- <leader>fd: 在当前选中 connection 搜对象；没选中过则先选 connection
+      -- <leader>fd: 搜对象永远走本地(非TP)连接；没选中过则先选 connection
       local function schema_for_selected()
         local conn = load_saved()
-        if conn then
-          search_objects(conn)
-        else
-          pick_conn(search_objects)
+        if not conn then
+          pick_conn(function(c)
+            search_objects(local_conn_of(c) or c)
+          end)
+          return
         end
+        search_objects(local_conn_of(conn) or conn)
       end
 
       vim.api.nvim_create_user_command("DBTableSchema", function(a)
         if a.args ~= "" then
           set_selected(a.args)
-          search_tables(a.args)
+          -- 显式指定连接时按原样查（含 TP），不走本地映射，作为逃生口
+          search_objects(a.args)
         else
           choose_connection()
         end
@@ -271,16 +557,157 @@ return {
       vim.keymap.set("n", "<leader>fs", choose_connection, { desc = "DB: 选择连接" })
       vim.keymap.set("n", "<leader>fd", schema_for_selected, { desc = "DB: 搜索表结构" })
 
-      -- 给 SQL buffer 打上连接与执行键位（新建与复用都调用，确保 q 一定生效）
+      -- 给 SQL buffer 打上补全/执行两条线路的连接与键位。
+      -- 双线路：补全(b:db/b:dadbod)与结构查看走本地(非TP)连接(快)；
+      --         执行(q 键)走选中的连接(可能 TP)，避免本地查询时的慢/网络往返。
       local function setup_sql_buffer(buf, conn)
-        local url = url_of(conn)
-        vim.b[buf].db = url
-        vim.b[buf].dadbod = url
+        -- conn = 选中的连接（执行目标，可能 TP）
+        local exec_url = url_of(conn) -- 执行连接 URL
+
+        -- 补全/结构连接：本地(非TP)映射；映射不到则回退到选中连接并提醒
+        local comp_conn = local_conn_of(conn)
+        local comp_url = comp_conn and url_of(comp_conn) or exec_url
+        if not comp_conn then
+          vim.notify(
+            "未找到 " .. conn .. " 的本地连接，补全回退到该连接",
+            vim.log.levels.WARN,
+            { title = "DB" }
+          )
+        end
+
+        vim.b[buf].db = comp_url -- dadbod 空闲连接/补全默认走本地
+        vim.b[buf].dadbod = comp_url
         vim.b[buf].db_query_temp = true
-        -- 在该 buffer 里：visual 选中按 q 执行选中；normal 下 q 执行整个 buffer
-        -- 注意必须用 ":"（而非 <cmd>）——<cmd> 不会更新 '< '> 可视标记
-        vim.keymap.set("x", "q", ":DB<CR>", { buffer = buf, desc = "DB: 执行选中 SQL" })
-        vim.keymap.set("n", "q", ":%DB<CR>", { buffer = buf, desc = "DB: 执行整个 buffer" })
+        -- 本地(非TP)连接名：结构查看/K 悬浮用（只在 SQL buffer 设）
+        vim.b[buf].db_comp_conn = comp_conn or conn
+
+        -- 执行连接信息存独立变量，供 q 键显式传给 :DB
+        vim.b[buf].db_exec_conn = conn
+        vim.b[buf].db_exec_url = exec_url
+
+        -- 从 buffer 文本里，找光标所在分号段内最后一个 FROM/JOIN/UPDATE/INTO 的表名
+        -- （裸名，去 schema 前缀）。dadbod 的补全只认裸表名，不依赖正则，按关键字字面扫。
+        local function detect_from_table()
+          local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+          local cursor = vim.api.nvim_win_get_cursor(0) -- {row(1-based), col(0-based)}
+          -- 只取光标之前的文本（当前正在写的语句部分）
+          local parts = {}
+          for i = 1, cursor[1] do
+            if i < cursor[1] then
+              parts[#parts + 1] = lines[i]
+            else
+              parts[#parts + 1] = lines[i]:sub(1, cursor[2])
+            end
+          end
+          local seg = table.concat(parts, "\n")
+          -- 只看最后一个 ';' 之后的段落（即当前语句）
+          local semi = 0
+          while true do
+            local p = seg:find(";", semi + 1, true)
+            if not p then
+              break
+            end
+            semi = p
+          end
+          if semi > 0 then
+            seg = seg:sub(semi + 1)
+          end
+          local lower = seg:lower()
+          -- 逐个关键字找最后一次出现（Lua pattern 无交替，故分开扫）
+          local best_pos, best_name = 0, nil
+          for _, kw in ipairs({ "from", "join", "update", "into" }) do
+            local init = 1
+            while true do
+              local s, e, cap = lower:find("%f[%a]" .. kw .. "%f[%A]%s+([%w_%.]+)", init)
+              if not s then
+                break
+              end
+              if s > best_pos then
+                best_pos, best_name = s, seg:sub(e - #cap + 1, e)
+              end
+              init = e + 1
+            end
+          end
+          if not best_name then
+            return nil
+          end
+          -- 去 schema 前缀：取最后一个 '.' 之后
+          local dot = best_name:find("%.")
+          if dot then
+            best_name = best_name:sub(dot + 1)
+          end
+          return best_name
+        end
+
+        -- 表切换时才更新 b:db_table 并触发 dadbod 拉该表字段（补全焦点化）。
+        -- 必须防抖 + 校验表名有效：否则边打 "pas_sleeve_accts" 会每个前缀都触发一次
+        -- fetch（每次约 300ms 且内含一次连库校验），卡到没法打字。
+        vim.b[buf].db_table = nil
+        vim.b[buf]._db_tracked_table = ""
+
+        local track_timer ---@type uv_timer_t?
+        local function refresh_table_tracking()
+          if not vim.api.nvim_buf_is_valid(buf) then
+            return
+          end
+          -- 防抖：停手 500ms 后再判断，避免打表名过程中反复触发
+          if track_timer then
+            track_timer:stop()
+            track_timer:close()
+            track_timer = nil
+          end
+          local t = vim.uv.new_timer()
+          track_timer = t
+          t:start(500, 0, vim.schedule_wrap(function()
+            if not track_timer then
+              return
+            end
+            track_timer:stop()
+            track_timer:close()
+            track_timer = nil
+            if not vim.api.nvim_buf_is_valid(buf) then
+              return
+            end
+            local tbl = detect_from_table()
+            -- 表名没打完整（不是已知表）就先不动，等打完再说。
+            -- 用本地连接校验（补全走的就是它）。
+            if not tbl or not known_table(vim.b[buf].db_comp_conn or conn, tbl) then
+              return
+            end
+            if tbl == vim.b[buf]._db_tracked_table then
+              return
+            end
+            vim.b[buf]._db_tracked_table = tbl
+            vim.b[buf].db_table = tbl
+            -- 同步给 dadbod-completion（它的 buf.table 只在 fetch 时刷新）
+            pcall(vim.fn["vim_dadbod_completion#fetch"], buf)
+            -- 预取该表字段：dadbod 是按需异步拉的，先踢一次，
+            -- 等用户写到 where 时字段已就绪（否则第一次补不出字段）
+            pcall(vim.fn["vim_dadbod_completion#omni"], 0, "_db_prefetch_")
+            vim.notify("当前表: " .. tbl .. "（已准备字段补全）", vim.log.levels.INFO, {
+              title = "DB",
+            })
+          end))
+        end
+
+        vim.api.nvim_create_autocmd({ "TextChangedI", "TextChangedP", "CursorMovedI" }, {
+          buffer = buf,
+          callback = refresh_table_tracking,
+        })
+
+        -- 执行键：显式携带 db_exec_url，实际执行走选中连接（可能 TP）
+        -- 用 b: 变量引用作为 :DB 前缀 URL（dadbod 原生支持 [gtwb]: 变量 eval，
+        -- 避免 URL 中 % @ 等字符命令展开出错）。
+        if exec_url then
+          vim.keymap.set("x", "q", ":DB b:db_exec_url<CR>", {
+            buffer = buf, desc = "DB: 执行选中 SQL（走选中连接）" })
+          vim.keymap.set("n", "q", ":%DB b:db_exec_url<CR>", {
+            buffer = buf, desc = "DB: 执行整个 buffer（走选中连接）" })
+        end
+
+        -- K：悬浮显示光标下对象结构（走本地连接）
+        vim.keymap.set("n", "K", hover_object, {
+          buffer = buf, desc = "DB: 悬浮查看对象结构" })
       end
 
       -- <leader>fq: 新建 SQL buffer，绑定当前选中 connection（带 dadbod 补全）
