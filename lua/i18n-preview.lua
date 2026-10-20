@@ -78,12 +78,9 @@ local function build_cache(root, out_path)
 end
 
 -- yml 比缓存新 -> 需要重建
-local function cache_stale(root, cache_path)
-  if vim.fn.filereadable(cache_path) == 0 then
-    return true
-  end
-  local cache_time = vim.fn.getftime(cache_path)
-  local files = vim.fn.glob(root .. "/config/locales/**/*.yml", false, true)
+-- 除了项目自身 config/locales，也查 WORKSPACE 并入的 locales（home/acct）
+local function stale_glob(cache_time, pattern)
+  local files = vim.fn.glob(pattern, false, true)
   for _, f in ipairs(files) do
     if vim.fn.getftime(f) > cache_time then
       return true
@@ -92,17 +89,40 @@ local function cache_stale(root, cache_path)
   return false
 end
 
-local function load_data(root)
-  if store[root] then
-    return store[root]
+local function cache_stale(root, cache_path)
+  if vim.fn.filereadable(cache_path) == 0 then
+    return true
   end
+  local cache_time = vim.fn.getftime(cache_path)
+  if stale_glob(cache_time, root .. "/config/locales/**/*.yml") then
+    return true
+  end
+  local ws = vim.env.WORKSPACE
+  if ws and ws ~= "" then
+    if stale_glob(cache_time, ws .. "/config/locales/home/*.yml") then
+      return true
+    end
+    if stale_glob(cache_time, ws .. "/config/locales/acct/*.yml") then
+      return true
+    end
+  end
+  return false
+end
+
+local function load_data(root)
   local path = cache_path_for(root)
+  -- 每次都做轻量过期检查（glob + mtime，~0.3ms）。会话开着时 yml 有改动
+  -- （git pull / 手改）也能自动重建，不必手动 <leader>ir 或重启。
   if cache_stale(root, path) then
     local ok, err = build_cache(root, path)
     if not ok then
       vim.notify("i18n-preview: 构建 locale 缓存失败: " .. err, vim.log.levels.WARN)
-      return nil
+      return store[root]
     end
+    store[root] = nil
+  end
+  if store[root] then
+    return store[root]
   end
   local f = io.open(path, "r")
   if not f then
