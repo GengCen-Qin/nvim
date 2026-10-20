@@ -12,6 +12,11 @@ keymap("n", "<C-w>", "<cmd>bdelete<CR>", { desc = "Close current buffer" })
 -- 1.1. space + w + w: 关闭当前 Buffer
 keymap("n", "<leader>ww", "<cmd>bdelete<CR>", { desc = "Close current buffer" })
 
+-- 1.1.1. space + b + a: 关闭所有 Buffer (含当前)
+keymap("n", "<leader>ba", function()
+  Snacks.bufdelete.all()
+end, { desc = "Close all buffers" })
+
 -- 1.2. Ctrl + a: 全选整个 buffer (进入 Visual 模式)
 -- 覆盖 nvim 内置 <C-a>(数字 +1)；gg 到首行，V 进入行可视，G 选到末行
 keymap({ "n", "v", "x" }, "<C-a>", "ggVG", { desc = "Select all (visual mode)" })
