@@ -6,6 +6,7 @@
 --                  * 若已选中 connection：直接进搜索
 --                  * 若未选中过（或文件里没有记录）：先弹 connection 选择
 --                  * 表/视图/物化视图 -> 列结构；函数/过程 -> \sf 源码
+--                  * 结构与源码都在悬浮窗展示，q 或 Esc 关闭，回到原 buffer
 --                  * 永远走本地(非TP)连接，TP 连接会按名字映射到本地对应连接
 --   <leader>fq   新建一个 SQL buffer（filetype=sql，带 dadbod 补全）
 --                  * 自动绑定当前选中的 connection；未选中则先弹选择
@@ -122,32 +123,6 @@ return {
         end)
       end
 
-      -- 打开只读 scratch 新 buffer 展示结构（当前窗口直接显示，不切分屏）
-      local function show(lines, title)
-        local prev = vim.api.nvim_get_current_buf()
-        local buf = vim.api.nvim_create_buf(false, true) -- 新 scratch buffer
-        vim.bo[buf].buftype = "nofile"
-        vim.bo[buf].bufhidden = "wipe"
-        vim.bo[buf].swapfile = false
-        vim.bo[buf].modifiable = true
-        vim.bo[buf].filetype = "sql"
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-        vim.bo[buf].modifiable = false
-        -- schema 行可能很长，关闭换行：先切为当前窗口再设（vim.wo 需要 buffer 在窗口上）
-        -- 不是分屏，所以 q 直接回到之前的 buffer
-        vim.keymap.set("n", "q", function()
-          if vim.api.nvim_buf_is_valid(prev) then
-            vim.api.nvim_set_current_buf(prev)
-          else
-            vim.cmd("enew")
-          end
-        end, { buffer = buf, desc = "Close (回到上一个 buffer)" })
-        pcall(vim.api.nvim_buf_set_name, buf, "db-schema://" .. title)
-        vim.api.nvim_set_current_buf(buf)
-        -- schema 行可能很长，关闭换行：对显示该 buffer 的当前窗口设置（不影响外部文件）
-        vim.api.nvim_set_option_value("wrap", false, { win = 0 })
-      end
-
       -- 统一执行一条 psql 只读命令。raw=true 加 -tA（行结果便于解析，如对象列表、函数源码）；
       -- 结构展示（\d+）不带 -tA，保留 psql 对齐表头。
       local function run_psql(conn, sql, raw)
@@ -164,7 +139,8 @@ return {
         return vim.fn["db#systemlist"](cmd)
       end
 
-      -- 用悬浮窗展示结构（K 键用，看完 Esc 关闭回到 SQL buffer）
+      -- 用悬浮窗展示结构/源码（<leader>fd 与 K 共用）。
+      -- 看完 q 或 Esc 关闭，焦点回到原来的窗口/buffer。
       -- 注意：这里不能用 nvim_buf_call 包裹——它会在回调返回时把当前窗口还原回
       -- SQL 窗口，导致浮窗拿不到焦点、Esc 落到 SQL buffer 上关不掉浮窗。
       local function show_float(lines, title)
@@ -177,11 +153,11 @@ return {
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
         pcall(vim.api.nvim_buf_set_name, buf, "db-float://" .. title)
         local win = vim.api.nvim_open_win(buf, true, {
-          relative = "cursor",
+          relative = "editor",
           width = width,
           height = height,
-          col = 0,
-          row = 1,
+          col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+          row = math.max(0, math.floor((vim.o.lines - height) / 2)),
           style = "minimal",
           border = "rounded",
           title = " " .. title .. " ",
@@ -287,20 +263,14 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         return body
       end
 
-      -- 展示表/视图结构。target_buf 给定时用悬浮窗（K 键，不替换当前 buffer），
-      -- 否则占用当前窗口（<leader>fd）。
-      local function describe(conn, schema, name, target_buf, kind)
+      -- 悬浮展示表/视图结构（不替换当前 buffer）
+      local function describe(conn, schema, name, kind)
         local body = relation_body(conn, schema, name, kind)
         if not body then
           vim.notify("获取结构失败: " .. schema .. "." .. name, vim.log.levels.ERROR)
           return
         end
-        local title = conn .. "." .. schema .. "." .. name
-        if target_buf then
-          show_float(body, title)
-        else
-          show(body, title)
-        end
+        show_float(body, conn .. "." .. schema .. "." .. name)
       end
 
       -- 取函数/过程源码（等价 \sf，经 oid 精确取，避免重载歧义）
@@ -310,7 +280,7 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           vim.notify("获取函数源码失败: " .. fqn, vim.log.levels.ERROR)
           return
         end
-        show(out, conn .. "." .. fqn)
+        show_float(out, conn .. "." .. fqn)
       end
 
       -- 按名字查对象类型（表/视图/物化视图/函数/过程），走本地连接。
@@ -515,7 +485,7 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           if choice.oid then
             show_func(conn, choice.oid, choice.fqn)
           else
-            describe(conn, choice.schema, choice.name, nil, choice.kind)
+            describe(conn, choice.schema, choice.name, choice.kind)
           end
         end)
       end
