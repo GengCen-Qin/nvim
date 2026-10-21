@@ -1,11 +1,15 @@
 -- 选中一段代码后查看这段代码的 git line history（提交历史）
 --
 -- 在 visual 模式下选中几行，按 <leader>gl 弹出 Snacks picker，
--- 列出影响该行区间的全部提交；预览是 git show，回车 checkout 到该提交。
+-- 列出影响该行区间的全部提交；预览只展示该提交对这几行的改动（而不是整个提交），
+-- 回车 checkout 到该提交。
 --
--- 原理：把视觉选区的起止行转成 `git log -L <start>,<end>:<file>`，
--- 复用 Snacks 自带的 git_log 格式与 git_show 预览。
+-- 原理：`git log -p -L <start>,<end>:<file>` 一次拿到该行区间的全部提交，
+-- 每个提交后面跟着的 patch 就是 git 从当前版本追踪出来的、恰好覆盖这几行的改动。
 local M = {}
+
+-- git --pretty 里用它标记每个提交的开头，避免与 patch 内容混淆
+local SEP = "\1"
 
 ---解析一行 `git log --pretty` 输出（与 snacks picker source/git.lua 一致）
 ---@param line string
@@ -29,48 +33,67 @@ end
 ---@field file string 相对 git 根目录的路径
 ---@field cwd string git 根目录
 
----Snacks finder：异步执行 git log -L 并逐个产出 item
+---跑一次 `git log -p -L`，按提交切成 item，每个 item 带该提交对所选行范围的 patch
 ---@param opts git-line-history.Opts
----@param ctx snacks.picker.finder.ctx
----@return snacks.picker.finder.async
-function M.history(opts, ctx)
+---@return snacks.picker.finder.Item[]
+local function collect(opts)
   local args = {
     "-c", "core.quotepath=false",
     "log",
-    "--pretty=format:%h %s (%ad) <%an>",
+    "--pretty=format:" .. SEP .. "%h %s (%ad) <%an>",
     "--abbrev-commit",
     "--decorate",
     "--date=short",
     "--color=never",
     "--no-show-signature",
-    "--no-patch",
+    "-p",
     "-L",
     ("%d,%d:%s"):format(opts.range[1], opts.range[2], opts.file),
   }
 
-  return function(cb)
-    require("snacks.picker.source.proc").proc(
-      ctx:opts({
-        cwd = opts.cwd,
-        cmd = "git",
-        args = args,
-        ---@param item snacks.picker.finder.Item
-        transform = function(item)
-          local parsed = parse_line(item.text)
-          if not parsed then
-            return false -- 跳过 git 的告警/空行
-          end
-          item.commit = parsed.commit
-          item.msg = parsed.msg
-          item.date = parsed.date
-          item.author = parsed.author
-          item.cwd = opts.cwd
-          item.file = opts.file
-        end,
-      }),
-      ctx
-    )(cb)
+  local out = vim.system(vim.list_extend({ "git" }, args), { cwd = opts.cwd, text = true }):wait(5000)
+  if out.code ~= 0 then
+    Snacks.notify.warn(vim.trim(out.stderr or "git log -L 执行失败"), { title = "Git Line History" })
+    return {}
   end
+
+  local items, patch = {}, nil
+  for _, line in ipairs(vim.split(out.stdout or "", "\n", { plain = true })) do
+    if line:sub(1, 1) == SEP then
+      patch = nil
+      local parsed = parse_line(line:sub(2))
+      if parsed then
+        patch = {}
+        parsed.patch = patch
+        parsed.cwd = opts.cwd
+        parsed.file = opts.file
+        items[#items + 1] = parsed
+      end
+    elseif patch then
+      patch[#patch + 1] = line
+    end
+  end
+  return items
+end
+
+---预览：只展示该提交对所选行范围的改动，而不是整个提交
+---@param ctx snacks.picker.preview.ctx
+function M.preview(ctx)
+  local patch = ctx.item.patch or {}
+  -- 丢掉 diff --git / index / --- / +++ 这些头部，直接从 hunk 开始看
+  local start
+  for i, line in ipairs(patch) do
+    if line:sub(1, 2) == "@@" then
+      start = i
+      break
+    end
+  end
+  if not start then
+    -- 该提交没有针对这段行的 hunk，回退到 snacks 自带的整个提交预览
+    return require("snacks.picker.preview").git_show(ctx)
+  end
+  ctx.preview:set_lines(vim.list_slice(patch, start))
+  ctx.preview:highlight({ ft = "git" })
 end
 
 ---取当前选区起止行
@@ -109,16 +132,21 @@ function M.open()
 
   local cwd = Snacks.git.get_root(vim.fs.dirname(file)) or vim.fn.getcwd()
   local rel = vim.fs.relpath(cwd, vim.fs.normalize(file)) or file
+  local title = ("Git Line History: %s [%d,%d]"):format(rel, s, e)
+
+  local items = collect({ range = { s, e }, file = rel, cwd = cwd })
+  if #items == 0 then
+    Snacks.notify.info(("没有提交改过 %s 的 %d-%d 行"):format(rel, s, e), { title = "Git Line History" })
+    return
+  end
 
   Snacks.picker.pick({
     cwd = cwd,
+    items = items,
     format = "git_log",
-    preview = "git_show",
+    preview = M.preview,
     confirm = "git_checkout",
-    finder = M.history,
-    range = { s, e },
-    file = rel,
-    title = ("Git Line History: %s [%d,%d]"):format(rel, s, e),
+    title = title,
     matcher = { sort_empty = false },
   })
 end
