@@ -7,7 +7,8 @@
 -- 交互：Snacks picker 列出 MR，右侧预览是该 MR 的详情（字段与 glab mr view 一致：
 -- 标题/状态/作者/指派/评审/分支/评论数/链接/描述），回车在新 tab 打开一个
 -- ft=diff 的 buffer 展示 glab mr diff 的内容。
--- 列表里已合并 / 已关闭的标 [merged] / [closed]，草稿标 [draft]。
+-- 列表里已合并 / 已关闭的标 [merged] / [closed]，草稿标 [draft]；
+-- 未合并且有冲突的（has_conflicts）整行标红并加 [conflict]，一眼能看出哪个要处理。
 --
 -- 实现要点：
 --   * 只跑一次 `glab mr list -F json`，列表和预览都从这份 JSON 渲染。预览不额外
@@ -17,6 +18,7 @@
 --     没有 Snacks 时退化成一条静态通知。
 --   * 预览里 key（title: / state: ...）与 "--" 分隔线单独高亮，高亮组
 --     GitlabMrKey / GitlabMrSep（默认 link Title / NonText），可在 colorscheme 覆盖。
+--   * 列表里有冲突的 MR 整行用 GitlabMrConflict（默认 link DiagnosticError）标红。
 --   * cwd 用当前工作目录，glab 据此自动识别项目，不需要 -R。
 --
 -- 依赖：glab 在 PATH 上且已登录（本机为 gitlab.yhlsoft.com）。
@@ -29,6 +31,8 @@ local M = {}
 -- 预览里 key 与分隔线的颜色。用 default = true，方便在 colorscheme 里覆盖。
 vim.api.nvim_set_hl(0, "GitlabMrKey", { link = "Title", default = true })
 vim.api.nvim_set_hl(0, "GitlabMrSep", { link = "NonText", default = true })
+-- 列表里「有冲突待处理」的 MR 用这个颜色整行标出来
+vim.api.nvim_set_hl(0, "GitlabMrConflict", { link = "DiagnosticError", default = true })
 
 ----------------------------------------------------------------------
 -- 工具
@@ -201,7 +205,14 @@ local function format_item(item)
     ret[#ret + 1] = { text, hl }
   end
 
-  add(("!%-6d"):format(mr.iid), "Number")
+  -- 有冲突是要优先处理的，整行用冲突色标出（iid / 标题都会变红）。
+  -- 只看未合并的：已合并/已关闭的 MR 即使 has_conflicts 为 true 也不用再处理了。
+  local conflict = mr.has_conflicts == true and mr.state == "opened"
+  local iid_hl = conflict and "GitlabMrConflict" or "Number"
+  add(("!%-6d"):format(mr.iid), iid_hl)
+  if conflict then
+    add("[conflict] ", "GitlabMrConflict")
+  end
   -- 看全部 MR 时列表里混着已合并/已关闭的，标出来才分得清；open 是常态就不标了
   if mr.state == "merged" then
     add("[merged] ", "DiagnosticOk")
@@ -211,7 +222,7 @@ local function format_item(item)
   if mr.draft then
     add("[draft] ", "DiagnosticWarn")
   end
-  add(mr.title or "", "Normal")
+  add(mr.title or "", conflict and "GitlabMrConflict" or "Normal")
   add(("  %s ← %s"):format(mr.target_branch or "?", mr.source_branch or "?"), "Comment")
   return ret
 end

@@ -5,7 +5,8 @@
 --
 -- 交互：Snacks picker 列出 MR，右侧预览该 MR 的详情（等价 glab mr view 的字段
 -- 排版），回车在新 tab 打开一个 ft=diff 的 buffer 展示 glab mr diff 的内容。
--- 列表里已合并 / 已关闭的会标 [merged] / [closed]，草稿标 [draft]。
+-- 列表里已合并 / 已关闭的会标 [merged] / [closed]，草稿标 [draft]；
+-- 未合并且有冲突的整行标红并加 [conflict]，方便一眼看出哪个要处理。
 --
 -- 依赖：glab 必须已登录（本机 gitlab.yhlsoft.com）。实现见 lua/gitlab-mr.lua。
 --
