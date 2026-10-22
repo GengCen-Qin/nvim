@@ -101,10 +101,32 @@ return {
         end
       end
 
+      -- 把连接重新应用到所有已打开的 SQL 查询 buffer（<leader>fq 建的），
+      -- 使这些 buffer 里的 q 执行 / 补全 / 结构查看都跟随新连接，
+      -- 不用切了连接后还得关闭重开 SQL buffer。
+      local function apply_conn_to_sql_buffers(conn)
+        if not (conn and vim.g.dbs and vim.g.dbs[conn]) then
+          return
+        end
+        local exec_url = vim.g.dbs[conn]
+        local comp_conn = local_conn_of(conn)
+        local comp_url = comp_conn and vim.g.dbs[comp_conn] or exec_url
+        for _, b in ipairs(vim.api.nvim_list_bufs()) do
+          if vim.b[b].db_exec_conn then -- 只更新 SQL 查询 buffer，别的 buffer 不受影响
+            vim.b[b].db_exec_conn = conn
+            vim.b[b].db_exec_url = exec_url
+            vim.b[b].db = comp_url
+            vim.b[b].dadbod = comp_url
+            vim.b[b].db_comp_conn = comp_conn or conn
+          end
+        end
+      end
+
       -- 切换 connection
       local function set_selected(conn)
         selected_conn = conn
         save_selected()
+        apply_conn_to_sql_buffers(conn)
         vim.notify("当前数据库连接: " .. conn, vim.log.levels.INFO, { title = "DB" })
       end
 
@@ -744,12 +766,24 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         -- 执行键：显式携带 db_exec_url，实际执行走选中连接（可能 TP）
         -- 用 b: 变量引用作为 :DB 前缀 URL（dadbod 原生支持 [gtwb]: 变量 eval，
         -- 避免 URL 中 % @ 等字符命令展开出错）。
-        if exec_url then
-          vim.keymap.set("x", "q", ":DB b:db_exec_url<CR>", {
-            buffer = buf, desc = "DB: 执行选中 SQL（走选中连接）" })
-          vim.keymap.set("n", "q", ":%DB b:db_exec_url<CR>", {
-            buffer = buf, desc = "DB: 执行整个 buffer（走选中连接）" })
+        -- 执行前先通知当前 SQL 在哪个 connection 上查询。
+        local function exec_db(range_str)
+          if vim.b[buf].db_exec_conn then
+            vim.notify("执行 SQL（连接: " .. vim.b[buf].db_exec_conn .. "）",
+              vim.log.levels.INFO, { title = "DB" })
+          end
+          if vim.b[buf].db_exec_url then
+            vim.cmd(range_str .. "DB b:db_exec_url")
+          end
         end
+        vim.keymap.set("x", "q", function()
+          -- visual 下先退出以锁住所选行，range 取可视选区
+          vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
+          exec_db("'<,'>")
+        end, { buffer = buf, desc = "DB: 执行选中 SQL（走选中连接）" })
+        vim.keymap.set("n", "q", function()
+          exec_db("%")
+        end, { buffer = buf, desc = "DB: 执行整个 buffer（走选中连接）" })
 
         -- K：悬浮显示光标下对象结构（走本地连接）
         vim.keymap.set("n", "K", hover_object, {
