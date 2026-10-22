@@ -14,6 +14,14 @@
 --                  * 双线路：补全走本地(非TP)连接(快)；执行走选中的连接(可能 TP)
 --                  * normal 模式 K：悬浮展示光标下单词的结构（表/视图/函数），
 --                    q 或 Esc 关闭，回到 SQL buffer
+--   ruby 文件 normal 模式 K（仅 filetype=ruby，其它文件类型不绑）：
+--                  光标停在模型类名（如 PasAccount）上按 K，按
+--                  「显式 self.table_name 优先、否则 Rails tableize 推导」
+--                  解析成数据表并悬浮展示列结构，q 或 Esc 关闭。
+--                  类名->表名见 lua/db-model-map.lua。
+--                  非模型词（方法/变量/工具类）不接管：有支持 hover 的 LSP
+--                  才转交 vim.lsp.buf.hover()，否则静默（本机没装 ruby LSP，
+--                  直接调 hover 会报 textDocument/hover not supported）。
 --
 -- 表/视图结构默认只显示 Column / Type / Nullable / Default / Comment 五列；
 -- 想换成别的列，设 vim.g.db_schema_columns（见文件内 schema_field_expr 的可用字段）。
@@ -411,6 +419,74 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         end
       end
 
+      -- Ruby 模型类名 -> 表名的 K：光标停在 PasAccount 这类模型类名时，
+      -- 解析成数据库表并悬浮展示结构（q/Esc 关闭）。复用上方的
+      -- load_saved/local_conn_of/lookup_object/show_float。
+      -- 非模型（方法/变量/工具类）时回落到 LSP hover，不吞 K。
+      -- 安全的 K 回落：仅当有客户端支持 hover 才调 vim.lsp.buf.hover()。
+      -- 否则（如没装 ruby LSP，或 ctags-lsp 不支持 hover）会报
+      -- 「textDocument/hover is not supported by any server」——不能吞掉不报错。
+      local function fallback_hover()
+        local ok = vim.lsp.get_clients({ method = "textDocument/hover", bufnr = 0 })
+        if #ok > 0 then
+          vim.lsp.buf.hover()
+        end
+      end
+
+      local function ruby_model_hover()
+        local ok, modelmap = pcall(require, "db-model-map")
+        if not ok then
+          fallback_hover()
+          return
+        end
+        local file = vim.api.nvim_buf_get_name(0)
+        local root = modelmap.rails_root_of(file)
+        if not root then
+          fallback_hover()
+          return
+        end
+        local word = vim.fn.expand("<cword>")
+        if word == "" then
+          fallback_hover()
+          return
+        end
+        local map = modelmap.map_for(root)
+        local table_name = map[word]
+        if not table_name then
+          -- 不是模型类：转交 LSP（若支持 hover）
+          fallback_hover()
+          return
+        end
+        local conn = local_conn_of(load_saved()) or load_saved()
+        if not conn then
+          vim.notify("未选择数据库连接", vim.log.levels.WARN, { title = "DB" })
+          return
+        end
+        local obj = lookup_object(conn, table_name)
+        if not obj then
+          -- 类在但表解析不到（工具类 or 表不在该连接）：转交 LSP（若支持 hover）
+          fallback_hover()
+          return
+        end
+        local label = kind_label[obj.kind] or "?"
+        local title = string.format("model %s -> %s %s.%s", word, label, obj.schema, obj.name)
+        if obj.oid then
+          local out = run_psql(conn, "SELECT pg_get_functiondef(" .. obj.oid .. ");", true) or {}
+          if #out == 0 then
+            vim.notify("获取函数源码失败: " .. obj.name, vim.log.levels.ERROR)
+            return
+          end
+          show_float(out, title)
+        else
+          local body = relation_body(conn, obj.schema, obj.name, obj.kind)
+          if not body then
+            vim.notify("获取结构失败: " .. obj.name, vim.log.levels.ERROR)
+            return
+          end
+          show_float(body, title)
+        end
+      end
+
       -- 拉取全部对象（表/视图/物化视图/函数/过程），统一模糊选择
       local function search_objects(conn)
         vim.notify("正在获取 " .. conn .. " 的对象列表...", vim.log.levels.INFO)
@@ -738,6 +814,42 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
       end
 
       vim.keymap.set("n", "<leader>fq", new_sql_buffer, { desc = "DB: 新建 SQL buffer" })
+
+      -- .rb（含 Rakefile 等 ruby 文件）里 K 展示模型对应的表结构。
+      -- LazyVim 的 K（Snacks.keymap.set + lsp 过滤器）在 LSP attach 后经 100ms 防抖
+      -- 才写入 buffer 局部映射，且始终晚于 FileType/LspAttach。所以在这里：
+      --   * LspAttach 后再延迟一点盖回一次，压过 snacks 防抖写入的 Hover；
+      --   * BufEnter 兜底，确保进 buffer 后最终生效的一定是本映射。
+      -- 非模型词时 ruby_model_hover 会安全回落到 LSP hover（见 fallback_hover）。
+      local function bind_ruby_k(buf)
+        if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].filetype ~= "ruby" then
+          return
+        end
+        vim.keymap.set("n", "K", ruby_model_hover, {
+          buffer = buf, desc = "DB: 悬浮查看模型对应的表结构",
+        })
+      end
+
+      vim.api.nvim_create_autocmd({ "FileType" }, {
+        callback = function(ev)
+          bind_ruby_k(ev.buf)
+        end,
+      })
+      -- snacks 的 LSP keymap 是 100ms 防抖延后写；LspAttach 后同样延后 200ms 再盖回
+      vim.api.nvim_create_autocmd("LspAttach", {
+        callback = function(ev)
+          local buf = ev.buf
+          vim.defer_fn(function()
+            bind_ruby_k(buf)
+          end, 200)
+        end,
+      })
+      -- 每次进入 buffer 都盖回，最终一定生效（覆盖面 LazyVim 的 Hover）
+      vim.api.nvim_create_autocmd("BufEnter", {
+        callback = function(ev)
+          bind_ruby_k(ev.buf)
+        end,
+      })
 
       -- 退出时把当前选中写盘（load_saved 时已写，这里兜底）
       vim.api.nvim_create_autocmd("VimLeavePre", {
