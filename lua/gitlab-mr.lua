@@ -1,11 +1,13 @@
--- 通过 glab 查看当前项目的 GitLab MR（未合并），选中后在 buffer 里看 diff。
+-- 通过 glab 查看当前项目的 GitLab MR，选中后在 buffer 里看 diff。
 --
 --   <leader>sm   当前项目里「我创建的」未合并 MR
---   <leader>sM   当前项目里全部未合并 MR
+--   <leader>sM   当前项目里「我创建的」MR（含已合并 / 已关闭）
+-- 两者都只取最近 20 条（glab 默认按最近更新排序），MR 攒多了也不会拖慢。
 --
 -- 交互：Snacks picker 列出 MR，右侧预览是该 MR 的详情（字段与 glab mr view 一致：
 -- 标题/状态/作者/指派/评审/分支/评论数/链接/描述），回车在新 tab 打开一个
 -- ft=diff 的 buffer 展示 glab mr diff 的内容。
+-- 列表里已合并 / 已关闭的标 [merged] / [closed]，草稿标 [draft]。
 --
 -- 实现要点：
 --   * 只跑一次 `glab mr list -F json`，列表和预览都从这份 JSON 渲染。预览不额外
@@ -200,6 +202,12 @@ local function format_item(item)
   end
 
   add(("!%-6d"):format(mr.iid), "Number")
+  -- 看全部 MR 时列表里混着已合并/已关闭的，标出来才分得清；open 是常态就不标了
+  if mr.state == "merged" then
+    add("[merged] ", "DiagnosticOk")
+  elseif mr.state == "closed" then
+    add("[closed] ", "DiagnosticError")
+  end
   if mr.draft then
     add("[draft] ", "DiagnosticWarn")
   end
@@ -293,8 +301,11 @@ end
 -- 取数
 ----------------------------------------------------------------------
 
----列出当前项目的 MR（未合并），回调里拿到解析后的列表
----@param opts { author?: boolean }|nil author 默认 true = 只看我创建的
+---最多取多少条：MR 会越攒越多，只要最近这批就够了（glab 默认按最近更新排序）
+local LIMIT = 20
+
+---列出当前项目里我创建的 MR（近 LIMIT 条），回调里拿到解析后的列表
+---@param opts { all?: boolean }|nil all=true 含已合并/已关闭，默认只开着的
 ---@param cb fun(mrs: table[]|nil, err: string|nil)
 function M.fetch(opts, cb)
   opts = opts or {}
@@ -306,9 +317,10 @@ function M.fetch(opts, cb)
     return cb(nil, "当前不在 git 仓库里")
   end
 
-  local args = { "mr", "list", "-F", "json", "--per-page", "100" }
-  if opts.author ~= false then
-    vim.list_extend(args, { "--author", "@me" })
+  -- 总是看我创建的；all=true 时加 -A 把已合并/已关闭也带进来
+  local args = { "mr", "list", "-F", "json", "--per-page", tostring(LIMIT), "--author", "@me" }
+  if opts.all then
+    args[#args + 1] = "-A"
   end
 
   glab(args, root, function(out)
@@ -330,7 +342,7 @@ end
 ---@param opts { author?: boolean }|nil
 function M.open(opts)
   opts = opts or {}
-  local label = (opts.author == false) and "all open MRs" or "my open MRs"
+  local label = opts.all and "my MRs (all states)" or "my open MRs"
 
   -- 取列表要走网络，先转起来；下面每条返回路径都会 spinner_stop()
   spinner_start("fetching " .. label .. " ...")
@@ -341,7 +353,7 @@ function M.open(opts)
       return notify(err, vim.log.levels.WARN)
     end
     if #mrs == 0 then
-      return notify("当前项目没有未合并的 MR (" .. label .. ")")
+      return notify(("当前项目没有%s (%s)"):format(opts.all and "我创建的 MR" or "我创建的未合并 MR", label))
     end
 
     local items = {}
