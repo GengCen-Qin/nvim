@@ -50,6 +50,10 @@ keymap("n", "<C-M-Right>", "<C-i>", { desc = "Jump forward" })
 -- 注意：覆盖了 LazyVim 默认的 <leader>n（通知历史），需要通知历史用 :messages
 keymap("n", "<leader>n", "*", { desc = "Search word under cursor & jump to next (then n/N)" })
 
+-- 7.1. space + shift + n: 搜索光标下的单词并跳转到上一个匹配位置
+-- # = 与 * 相同，但反向查找（跳到上一个匹配），之后用 n / N 继续前后查找
+keymap("n", "<leader>N", "#", { desc = "Search word under cursor & jump to prev (then n/N)" })
+
 -- 8. Ctrl + Enter: 向下插入一行并进入插入模式
 -- 对应 Sublime Text 的 "Add Line Below"
 keymap("n", "<C-CR>", "o<Esc>k", { desc = "Insert line below and enter insert mode" })
