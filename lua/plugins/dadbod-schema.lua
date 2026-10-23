@@ -10,7 +10,10 @@
 --                  * 永远走本地(非TP)连接，TP 连接会按名字映射到本地对应连接
 --   <leader>fq   新建一个 SQL buffer（filetype=sql，带 dadbod 补全）
 --                  * 自动绑定当前选中的 connection；未选中则先弹选择
---                  * 在该 buffer 里 visual 选中 SQL，按 q 执行选中内容
+--                  * 光标停在哪行，按 q 就执行「该行归属的那条完整语句」
+--                    （treesitter 顶层 statement 节点，不需要先选中）；
+--                    光标在空白行（不属于任何语句）时才执行整个 buffer
+--                  * visual 选中 SQL 按 q：执行选中的内容
 --                  * 双线路：补全走本地(非TP)连接(快)；执行走选中的连接(可能 TP)
 --                  * normal 模式 K：悬浮展示光标下单词的结构（表/视图/函数），
 --                    q 或 Esc 关闭，回到 SQL buffer
@@ -787,8 +790,16 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           return kw == "SELECT" or kw == "WITH" or kw == "VALUES" or kw == "TABLE"
         end
 
+        -- 非查询语句（UPDATE/DDL 等）包不进子查询：落临时文件交给 dadbod 原生执行。
+        -- dadbod 把这个文件直接当输入文件用，执行期间不能删，留给 /tmp 自己回收。
+        local function run_native(sql)
+          local f = vim.fn.tempname() .. ".sql"
+          vim.fn.writefile(vim.split(sql, "\n"), f)
+          vim.cmd("DB b:db_exec_url < " .. vim.fn.fnameescape(f))
+        end
+
         -- 一次执行：把 SQL 包成 JSON 跑，结果复制到剪贴板 + 预览窗口展示
-        local function run_as_json(sql, url, range_str)
+        local function run_as_json(sql, url)
           local inp = vim.fn.tempname() .. ".sql"
           vim.fn.writefile(vim.split(
             "SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (\n"
@@ -806,7 +817,7 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
               if not out then
                 -- 不是可包装的查询：回退 dadbod 原生执行（正常表格展示）
                 vim.notify("无法以 JSON 执行，回退普通查询", vim.log.levels.WARN, { title = "DB" })
-                vim.cmd(range_str .. "DB b:db_exec_url")
+                run_native(sql)
                 return
               end
               -- jq 格式化（保留列顺序）；jq 不可用则保持单行
@@ -828,41 +839,106 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           end)
         end
 
-        local function exec_db(range_str)
-          if vim.b[buf].db_exec_conn then
-            vim.notify("执行 SQL（连接: " .. vim.b[buf].db_exec_conn .. "）",
-              vim.log.levels.INFO, { title = "DB" })
+        -- 找光标所在行归属的完整 SQL 语句。
+        -- 用 treesitter 的顶层分号「;」token 当语句边界：分号不在字符串/注释里，
+        -- 所以对 SELECT 之外（SHOW/SET/DDL 等在 treesitter 里是 ERROR 节点）也可靠。
+        -- 返回该语句文本；光标在语句边界之间无内容（空白/注释行）或解析失败时返回 nil。
+        local function statement_at_cursor(buf)
+          local row = vim.api.nvim_win_get_cursor(0)[1] - 1 -- 0-based
+          local ok, parser = pcall(vim.treesitter.get_parser, buf, "sql")
+          if not (ok and parser) then
+            return nil
           end
-          if not vim.b[buf].db_exec_url then
+          -- 收集所有分号 token 的行号（语句结束行）。
+          -- 必须整树递归：SHOW/SET 这类语句 treesitter 会包成 ERROR 节点，
+          -- 分号藏在 ERROR 里面，只扫 program 的直接子节点会漏掉。
+          local eol = {}
+          local function collect(n)
+            if n:type() == ";" then
+              eol[#eol + 1] = (n:start())
+            end
+            for c in n:iter_children() do
+              collect(c)
+            end
+          end
+          for _, tree in ipairs(parser:parse()) do
+            local root = tree:root()
+            if root then
+              collect(root)
+            end
+          end
+          if #eol == 0 then
+            return nil
+          end
+          table.sort(eol)
+          -- 光标行是空白行：不归属任何语句（注释行不算，它常出现在多行 SQL 中间）
+          local cur = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
+          if cur:match("^%s*$") then
+            return nil
+          end
+          -- 找包含光标行的语句区间 [start_row, end_row]（按分号切出的每一段）
+          local start_row = 0
+          for _, er in ipairs(eol) do
+            if row >= start_row and row <= er then
+              local lines = vim.api.nvim_buf_get_lines(buf, start_row, er + 1, false)
+              local text = table.concat(lines, "\n")
+              -- 这一段若无实质内容（空语句 / 纯注释），跳过看下一段
+              local clean = text:gsub("%-%-[^\n]*", ""):gsub("%s+", "")
+              if clean ~= "" then
+                return text:gsub("^%s+", ""):gsub("%s+$", "")
+              end
+            end
+            start_row = er + 1
+          end
+          -- 光标在所有分号之后、且后面还有非空内容（无结尾分号的最后一句）
+          local tail = table.concat(vim.api.nvim_buf_get_lines(buf, eol[#eol] + 1, -1, false), "\n")
+          local clean = tail:gsub("%-%-[^\n]*", ""):gsub("%s+", "")
+          if clean ~= "" then
+            return tail:gsub("^%s+", ""):gsub("%s+$", "")
+          end
+          return nil
+        end
+
+        -- 统一执行入口：只认 SQL 文本，调用方负责决定「执行哪一段」
+        local function execute_sql(sql)
+          local url = vim.b[buf].db_exec_url
+          if not url then
             return
-          end
-          -- 取本次要执行的 SQL 文本（visual 选区或整个 buffer）
-          local sql
-          if range_str == "%" then
-            sql = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-          else
-            local s = vim.api.nvim_buf_get_mark(buf, "<")[1]
-            local e = vim.api.nvim_buf_get_mark(buf, ">")[1]
-            sql = table.concat(vim.api.nvim_buf_get_lines(buf, s - 1, e, false), "\n")
           end
           sql = sql:gsub("%s*;%s*$", "") -- 末尾分号会让子查询包装变成语法错误
           if sql == "" then
             return
           end
+          if vim.b[buf].db_exec_conn then
+            vim.notify("执行 SQL（连接: " .. vim.b[buf].db_exec_conn .. "）",
+              vim.log.levels.INFO, { title = "DB" })
+          end
           if is_result_query(sql) then
-            run_as_json(sql, vim.b[buf].db_exec_url, range_str)
+            run_as_json(sql, url)
           else
-            vim.cmd(range_str .. "DB b:db_exec_url")
+            run_native(sql)
           end
         end
+
+        -- 取 buffer 文本：% = 整个 buffer，其余按 visual 选区
+        local function buffer_sql(range_str)
+          if range_str == "%" then
+            return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+          end
+          local s = vim.api.nvim_buf_get_mark(buf, "<")[1]
+          local e = vim.api.nvim_buf_get_mark(buf, ">")[1]
+          return table.concat(vim.api.nvim_buf_get_lines(buf, s - 1, e, false), "\n")
+        end
+
         vim.keymap.set("x", "q", function()
           -- visual 下先退出以锁住所选行，range 取可视选区
           vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
-          exec_db("'<,'>")
+          execute_sql(buffer_sql("'<,'>"))
         end, { buffer = buf, desc = "DB: 执行选中 SQL（走选中连接）" })
         vim.keymap.set("n", "q", function()
-          exec_db("%")
-        end, { buffer = buf, desc = "DB: 执行整个 buffer（走选中连接）" })
+          -- 光标所在行归属的完整语句；光标不在任何语句内（空白行）则整个 buffer
+          execute_sql(statement_at_cursor(buf) or buffer_sql("%"))
+        end, { buffer = buf, desc = "DB: 执行光标所在语句（无则整个 buffer）" })
 
         -- K：悬浮显示光标下对象结构（走本地连接）
         vim.keymap.set("n", "K", hover_object, {
