@@ -14,6 +14,11 @@
 --                  * 双线路：补全走本地(非TP)连接(快)；执行走选中的连接(可能 TP)
 --                  * normal 模式 K：悬浮展示光标下单词的结构（表/视图/函数），
 --                    q 或 Esc 关闭，回到 SQL buffer
+--   执行（q）：查询类语句（SELECT/WITH/VALUES/TABLE）只执行一次，直接以 JSON
+--                  * 包成 json_agg(row_to_json(t))，结果经 jq 格式化后进系统
+--                    剪贴板（+ 无名寄存器），并在预览窗口展示（含空结果集 []）
+--                  * 一次查询 = 一次执行，不再为拿 JSON 重跑第二遍
+--                  * 非查询语句（UPDATE/DDL 等）回退 dadbod 原生执行（正常表格）
 --   ruby 文件 normal 模式 K（仅 filetype=ruby，其它文件类型不绑）：
 --                  光标停在模型类名（如 PasAccount）上按 K，按
 --                  「显式 self.table_name 优先、否则 Rails tableize 推导」
@@ -766,13 +771,87 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         -- 执行键：显式携带 db_exec_url，实际执行走选中连接（可能 TP）
         -- 用 b: 变量引用作为 :DB 前缀 URL（dadbod 原生支持 [gtwb]: 变量 eval，
         -- 避免 URL 中 % @ 等字符命令展开出错）。
-        -- 执行前先通知当前 SQL 在哪个 connection 上查询。
+        --
+        -- 查询类语句（SELECT/WITH/VALUES/TABLE）只执行一次，直接以 JSON 返回：
+        --   SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (<你的SQL>) t
+        -- 结果原样进剪贴板并展示在预览窗口，不再为了拿 JSON 重跑第二遍。
+        -- row_to_json 保留列顺序（jsonb 会重排，所以不用 jsonb）。
+        -- 非查询语句（UPDATE/DDL 等）包不进子查询，回退 dadbod 原生执行。
+        local function is_result_query(sql)
+          local head = sql:gsub("^%s+", "")
+          while head:sub(1, 2) == "--" do -- 跳过前导注释行
+            head = head:gsub("^%-%-[^\n]*\n?", ""):gsub("^%s+", "")
+          end
+          local kw = head:match("^%a+")
+          kw = kw and kw:upper() or ""
+          return kw == "SELECT" or kw == "WITH" or kw == "VALUES" or kw == "TABLE"
+        end
+
+        -- 一次执行：把 SQL 包成 JSON 跑，结果复制到剪贴板 + 预览窗口展示
+        local function run_as_json(sql, url, range_str)
+          local inp = vim.fn.tempname() .. ".sql"
+          vim.fn.writefile(vim.split(
+            "SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (\n"
+              .. sql .. "\n) t", "\n"), inp)
+          -- ON_ERROR_STOP=1：否则 psql 报错也返回 0；-tA 去掉表头/内边距，
+          -- 拿到的是纯 JSON（本机 psql 14 无原生 json 输出格式）
+          vim.system({
+            "psql", "-w", "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-tA",
+            "--dbname=" .. url, "-f", inp,
+          }, { text = true }, function(res)
+            -- 回调在 fast event context：删文件/设寄存器/开窗口都要回主循环
+            vim.schedule(function()
+              vim.fn.delete(inp)
+              local out = (type(res) == "table" and res.code == 0) and vim.trim(res.stdout or "") or nil
+              if not out then
+                -- 不是可包装的查询：回退 dadbod 原生执行（正常表格展示）
+                vim.notify("无法以 JSON 执行，回退普通查询", vim.log.levels.WARN, { title = "DB" })
+                vim.cmd(range_str .. "DB b:db_exec_url")
+                return
+              end
+              -- jq 格式化（保留列顺序）；jq 不可用则保持单行
+              local pretty = vim.fn.system({ "jq", "." }, out)
+              if vim.v.shell_error == 0 and pretty ~= "" then
+                out = vim.trim(pretty)
+              end
+              vim.fn.setreg("+", out)
+              vim.fn.setreg('"', out)
+              local f = vim.fn.tempname() .. ".json"
+              vim.fn.writefile(vim.split(out, "\n"), f)
+              vim.cmd("pedit " .. vim.fn.fnameescape(f))
+              local pb = vim.fn.bufnr(f)
+              if pb > 0 then
+                vim.bo[pb].modifiable = false -- 纯展示，防误改/防自动保存
+              end
+              vim.notify("已复制为 JSON（" .. #out .. " 字符）", vim.log.levels.INFO, { title = "DB" })
+            end)
+          end)
+        end
+
         local function exec_db(range_str)
           if vim.b[buf].db_exec_conn then
             vim.notify("执行 SQL（连接: " .. vim.b[buf].db_exec_conn .. "）",
               vim.log.levels.INFO, { title = "DB" })
           end
-          if vim.b[buf].db_exec_url then
+          if not vim.b[buf].db_exec_url then
+            return
+          end
+          -- 取本次要执行的 SQL 文本（visual 选区或整个 buffer）
+          local sql
+          if range_str == "%" then
+            sql = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+          else
+            local s = vim.api.nvim_buf_get_mark(buf, "<")[1]
+            local e = vim.api.nvim_buf_get_mark(buf, ">")[1]
+            sql = table.concat(vim.api.nvim_buf_get_lines(buf, s - 1, e, false), "\n")
+          end
+          sql = sql:gsub("%s*;%s*$", "") -- 末尾分号会让子查询包装变成语法错误
+          if sql == "" then
+            return
+          end
+          if is_result_query(sql) then
+            run_as_json(sql, vim.b[buf].db_exec_url, range_str)
+          else
             vim.cmd(range_str .. "DB b:db_exec_url")
           end
         end
