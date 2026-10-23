@@ -16,7 +16,7 @@ return {
         recent = false,
         dev = { "/home/lucas/RubyProjects" },
         patterns = { ".git" },
-        projects = { "/home/lucas/RubyProjects/log" },
+        projects = {},
       }
       return opts
     end,
