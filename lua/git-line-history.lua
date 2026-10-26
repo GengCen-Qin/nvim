@@ -2,7 +2,7 @@
 --
 -- 在 visual 模式下选中几行，按 <leader>gl 弹出 Snacks picker，
 -- 列出影响该行区间的全部提交；预览只展示该提交对这几行的改动（而不是整个提交），
--- 回车 checkout 到该提交。
+-- 回车在独立 buffer 打开该提交的完整 view + diff。
 --
 -- 原理：`git log -p -L <start>,<end>:<file>` 一次拿到该行区间的全部提交，
 -- 每个提交后面跟着的 patch 就是 git 从当前版本追踪出来的、恰好覆盖这几行的改动。
@@ -96,6 +96,26 @@ function M.preview(ctx)
   ctx.preview:highlight({ ft = "git" })
 end
 
+---在独立 scratch buffer 打开某次提交的完整 view + diff（git show <commit>）
+---@param item snacks.picker.finder.Item
+local function open_commit_diff(item)
+  local out = vim.system(
+    { "git", "-C", item.cwd, "--no-pager", "show", item.commit },
+    { text = true }
+  ):wait(5000)
+  if out.code ~= 0 then
+    Snacks.notify.warn(vim.trim(out.stderr or "git show 执行失败"), { title = "Git Line History" })
+    return
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(out.stdout, "\n", { plain = true }))
+  vim.api.nvim_buf_set_name(buf, ("git show %s"):format(item.commit))
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].filetype = "git"
+  vim.api.nvim_win_set_buf(0, buf)
+end
+
 ---取当前选区起止行
 ---注意：visual 模式下用 Lua 回调触发映射时，'< '> 标记尚未更新（恒为 0），
 ---此时必须用 line("v")（选区锚点）与 line(".")（光标）取范围。
@@ -145,7 +165,12 @@ function M.open()
     items = items,
     format = "git_log",
     preview = M.preview,
-    confirm = "git_checkout",
+    confirm = function(picker, item)
+      picker:close()
+      if item then
+        open_commit_diff(item)
+      end
+    end,
     title = title,
     matcher = { sort_empty = false },
   })

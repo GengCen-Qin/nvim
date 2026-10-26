@@ -2,7 +2,7 @@
 --
 --   <leader>gl (visual)   对当前视觉选区覆盖的代码行，弹出该区间的提交历史
 --                         （git log -p -L 起,止:文件），预览只显示该提交对这几行的改动，
---                         回车可 checkout 到该提交。
+--                         回车在独立 buffer 打开该提交的完整 view + diff。
 --
 -- 实现见 lua/git-line-history.lua。
 --
