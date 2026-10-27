@@ -71,5 +71,34 @@ data.each do |locale, tree|
   out[locale.to_s] = { 's' => strings, 'h' => hashes }
 end
 
+# ---- 定义位置表：locale -> 完整 key -> [yaml 文件绝对路径, 1-based 行号] ----
+# key 在 yml 里是嵌套写法（acctslt:\n  invstdisc:），无法 grep 定位；必须走
+# Psych AST，取每个 key 标量的 start_line。按与上面相同的加载顺序遍历，
+# 后加载文件覆盖先加载（与 deep_merge 语义一致，保证跳到的是生效的那个值）。
+defs = Hash.new { |h, k| h[k] = {} }
+paths.each do |p|
+  begin
+    doc = Psych.parse_stream(File.read(p))
+  rescue StandardError
+    next # 与上面 skipped 一致，跳过坏文件
+  end
+  collected = {}
+  walk_ast = lambda do |node, prefix|
+    next unless node.is_a?(Psych::Nodes::Mapping)
+    node.children.each_slice(2) do |k, v|
+      next unless k.is_a?(Psych::Nodes::Scalar)
+      key = prefix.empty? ? k.value : "#{prefix}.#{k.value}"
+      collected[key] = k.start_line + 1
+      walk_ast.call(v, key) if v.is_a?(Psych::Nodes::Mapping)
+    end
+  end
+  doc.children.each { |c| walk_ast.call(c.root, '') }
+  collected.each do |full_key, line|
+    locale, dot, rest = full_key.partition('.')
+    defs[locale][rest] = [p, line] if !dot.empty? && !rest.empty?
+  end
+end
+out.each_key { |locale| out[locale]['d'] = (defs[locale] || {}) }
+
 File.write(out_path, JSON.generate(out))
 warn "i18n-preview: #{paths.size} 个文件, 载入 #{loaded}, 跳过 #{skipped.size}, 写出 #{out_path} (#{File.size(out_path)} bytes)"

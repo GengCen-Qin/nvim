@@ -7,6 +7,8 @@
 --   <leader>it  切换显示/隐藏
 --   <leader>is  浮窗查看本行 key 的完整译文
 --   <leader>ir  重建当前项目 locale 缓存（改了 yml 后用）
+--   <leader>gi  光标在 I18n 调用字符串内 -> 跳到当前语言 yml 里的定义行
+--               （独立键，不占用 gd，ctags/LSP 跳转完全不受影响）
 --   :I18nPreviewLocale [locale]   查看/切换渲染语言（默认 en）
 --
 -- 挂载：lua/config/autocmds.lua 里一行 require("i18n-preview").setup()。
@@ -244,7 +246,9 @@ local function find_calls(buf, row_start, row_end)
         if key and key ~= "" and not key:find("#{", 1, true) then
           local parent = args:parent()
           local _, ec = (parent or args):end_()
-          out[#out + 1] = { key = key, row = ar, col = ec }
+          local sr, sc = str:start()
+          local _, ecol = str:end_()
+          out[#out + 1] = { key = key, row = ar, col = ec, srow = sr, scol = sc, ecol = ecol }
         end
       end
     end
@@ -377,6 +381,73 @@ function M.reload()
   M.refresh()
 end
 
+-- 当前光标处命中的 I18n key（列必须落在某个调用字符串字面量内）
+local function resolve_key_at(buf, row, col)
+  for _, c in ipairs(find_calls(buf, row, row + 1)) do
+    if c.srow == row and col >= c.scol and col <= c.ecol then
+      return c.key
+    end
+  end
+  return nil
+end
+
+-- 命中当前光标的 I18n key 则跳转，返回 true；否则返回 false（不碰 gd）。
+function M.try_goto()
+  local buf = vim.api.nvim_get_current_buf()
+  if not M.opts.filetypes[vim.bo[buf].filetype] then
+    return false
+  end
+  local root = find_root(vim.api.nvim_buf_get_name(buf))
+  if not root then
+    return false
+  end
+  local data = load_data(root)
+  if not data then
+    return false
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local col = vim.api.nvim_win_get_cursor(0)[2]
+  local key_at = resolve_key_at(buf, row, col)
+  if not key_at then
+    return false
+  end
+  local decl = data[M.opts.locale] and data[M.opts.locale].d
+  if not decl then
+    vim.notify("i18n-preview: 缓存缺少定义位置表，请 <leader>ir 重建后重试", vim.log.levels.WARN)
+    return true
+  end
+  local loc = decl[key_at]
+  if not loc then
+    vim.notify(string.format("i18n-preview: 未找到 %s.%s 的定义", M.opts.locale, key_at), vim.log.levels.WARN)
+    return true
+  end
+  local file, line = loc[1], loc[2]
+  if vim.fn.filereadable(file) == 0 then
+    vim.notify("i18n-preview: 定义文件不存在: " .. file, vim.log.levels.WARN)
+    return true
+  end
+  vim.cmd("edit " .. vim.fn.fnameescape(file))
+  vim.api.nvim_win_set_cursor(0, { line, 0 })
+  vim.cmd("normal! zz")
+  return true
+end
+
+-- =================== <leader>gi 跳 I18n 定义（独立键，不碰 gd） ===================
+-- <leader>gi：光标在 I18n 调用字符串内 -> 跳当前语言 yml 里的定义行；否则提示。
+function M.goto_def()
+  if M.try_goto() then
+    return
+  end
+  vim.notify("i18n-preview: 光标不在 I18n.t() 调用上", vim.log.levels.INFO)
+end
+
+-- 在指定 buffer 上把 <leader>gi 设为 i18n 跳转（只 ruby，buffer-local，不影响其他语言）。
+local function rewire_gi(buf)
+  if vim.bo[buf].filetype == "ruby" then
+    vim.keymap.set("n", "<leader>gi", M.goto_def, { buffer = buf, desc = "I18nPreview: 跳转 locale 定义" })
+  end
+end
+
 -- 浮窗显示本行所有 key 的完整译文（长文本被截断时用）
 function M.show()
   local buf = vim.api.nvim_get_current_buf()
@@ -430,6 +501,55 @@ function M.setup(opts)
   vim.keymap.set("n", "<leader>it", M.toggle, { desc = "I18nPreview: 显示/隐藏译文" })
   vim.keymap.set("n", "<leader>is", M.show, { desc = "I18nPreview: 浮窗查看译文" })
   vim.keymap.set("n", "<leader>ir", M.reload, { desc = "I18nPreview: 重建 locale 缓存" })
+
+  -- <leader>gi 只在 ruby buffer 上挂 buffer-local（rewire_gi），其他语言不受影响。
+  -- LazyVim 的 snacks_picker extra（snacks 装着时自动启用）会把 <leader>gi/<leader>gI
+  -- 绑成 GitHub Issues。本机是企业 GitLab，这个 finder 在这版 snacks 下直接
+  -- module load loop，一按就刷 "Snacks Picker Finder not found: gh_issue"。
+  --
+  -- 时机：VeryLazy 太早——LazyVim 在同一次 VeryLazy 里还会加载 config.keymaps 把
+  -- <leader>gi 重新绑回 gh_issue。所以挂在 LazyVim 之后才触发的 User LazyVimKeymaps
+  -- 上，先覆盖全局键（非 ruby 按 <leader>gi 不再触发坏掉的 gh_issue），
+  -- ruby buffer 再由 rewire_gi 用 buffer-local 抢回给 i18n。
+  -- 双保险：LazyVimKeymaps 没赶上（极端启动顺序）就退回 VeryLazy。
+  local gi_installed = false
+  local function install_gi()
+    if gi_installed then
+      return
+    end
+    gi_installed = true
+
+    -- 全局 <leader>gi/<leader>gI：换成无操作，杜绝误按触发坏掉的 gh_issue。
+    -- 真正干活的是下面 ruby buffer-local 的 <leader>gi（rewire_gi）。
+    for _, k in ipairs({ "<leader>gi", "<leader>gI" }) do
+      vim.keymap.set("n", k, function() end, { desc = "I18nPreview: 仅 ruby buffer 生效" })
+    end
+
+    -- ruby buffer：<leader>gi 归 i18n 跳转
+    local gi_grp = vim.api.nvim_create_augroup("I18nPreviewGi", { clear = true })
+    vim.api.nvim_create_autocmd("LspAttach", {
+      group = gi_grp,
+      callback = function(args)
+        rewire_gi(args.buf)
+      end,
+    })
+    vim.api.nvim_create_autocmd("FileType", {
+      group = gi_grp,
+      pattern = "ruby",
+      callback = function(args)
+        rewire_gi(args.buf)
+      end,
+    })
+    -- 启动时就直接打开 ruby 文件的话，上面的 LspAttach/FileType 已错过，补挂一次
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_loaded(b) then
+        rewire_gi(b)
+      end
+    end
+  end
+  for _, event in ipairs({ "LazyVimKeymaps", "VeryLazy" }) do
+    vim.api.nvim_create_autocmd("User", { pattern = event, once = true, callback = install_gi })
+  end
 
   local group = vim.api.nvim_create_augroup("I18nPreview", { clear = true })
 
