@@ -14,6 +14,15 @@
 --                    （treesitter 顶层 statement 节点，不需要先选中）；
 --                    光标在空白行（不属于任何语句）时才执行整个 buffer
 --                  * visual 选中 SQL 按 q：执行选中的内容
+--                  * normal 模式 q：当前连接单库执行（光标所在语句）。q 又是前缀，
+--                    单独按 q 会等 timeoutlen 才触发；要零延迟就用两键 qq（等价单库）。
+--                  * normal 模式 qw：同一段 SQL 在当前连接的分区族里「多库并行执行」
+--                    （tp_pas -> tp_pas/tp_pas_2/tp_pas_3/tp_pas_4）。
+--                    族由连接名推导（同 base 名的连接），族里只有自己就退化为单库；
+--                    结果按分区分段展示（# 连接名 起头），并汇报成功/失败数。
+--                    目标是「光标所在语句」，与 q 一致。
+--                    注意别用 Q：Q 是 nvim 默认的 Ex mode，这版 nvim 下会直接报
+--                    E354: Invalid register name。
 --                  * 双线路：补全走本地(非TP)连接(快)；执行走选中的连接(可能 TP)
 --                  * normal 模式 K：悬浮展示光标下单词的结构（表/视图/函数），
 --                    q 或 Esc 关闭，回到 SQL buffer
@@ -73,6 +82,26 @@ return {
           base = base:gsub("^tp_", ""):gsub("_%d+$", "")
         end
         return vim.g.dbs[base] and base or nil
+      end
+
+      -- 多库执行（qw）的分区族：与选中连接同 base 名的所有连接。
+      -- base = 去掉末尾 _数字 的名字（tp_pas_3 -> tp_pas）。
+      -- 族 = base 本身 + 所有 "base_<数字>"，直接从 vim.g.dbs 推导，
+      -- 不另维护列表、不依赖连接是否同机；族里只有自己就退化为单库。
+      local function shard_group_of(conn)
+        if not (conn and vim.g.dbs) then
+          return { conn }
+        end
+        local base = conn:gsub("_%d+$", "")
+        local group = {}
+        local prefix = base .. "_"
+        for name in pairs(vim.g.dbs) do
+          if name == base or (name:sub(1, #prefix) == prefix and name:sub(#prefix + 1):match("^%d+$")) then
+            group[#group + 1] = name
+          end
+        end
+        table.sort(group)
+        return group
       end
 
       local function conn_names()
@@ -930,15 +959,121 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           return table.concat(vim.api.nvim_buf_get_lines(buf, s - 1, e, false), "\n")
         end
 
+        -- q / qq / qw 共用的执行目标：光标所在语句；光标不在任何语句内（空白行）则整个 buffer
+        local function target_sql()
+          return statement_at_cursor(buf) or buffer_sql("%")
+        end
+
+        -- 多分区执行（qw）：同一段 SQL 在当前连接的整个分区族上并行各跑一次。
+        -- 族由 shard_group_of 推导（tp_pas -> tp_pas/tp_pas_2/tp_pas_3/tp_pas_4）；
+        -- 族里只有自己时退化为单库执行，等同 q。
+        local function execute_shards(sql)
+          local group = shard_group_of(vim.b[buf].db_exec_conn)
+          if #group <= 1 then
+            execute_sql(sql)
+            return
+          end
+          sql = sql:gsub("%s*;%s*$", "") -- 末尾分号会让子查询包装变成语法错误
+          if sql == "" then
+            return
+          end
+          local rows = is_result_query(sql) -- 查询类包成 JSON，UPDATE/DDL 原样跑
+          vim.notify(
+            string.format("多分区执行（%d 个库）: %s", #group, table.concat(group, ", ")),
+            vim.log.levels.INFO,
+            { title = "DB" }
+          )
+
+          -- 一个分区一次 psql（-f 走临时文件，避免 SQL 里的特殊字符进 shell）
+          local function start_shard(name, done)
+            local inp = vim.fn.tempname() .. ".sql"
+            local body = rows
+                and ("SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (\n"
+                  .. sql .. "\n) t")
+              or sql
+            vim.fn.writefile(vim.split(body, "\n"), inp)
+            vim.system({
+              "psql", "-w", "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-tA",
+              "--dbname=" .. vim.g.dbs[name], "-f", inp,
+            }, { text = true }, function(res)
+              -- 回调在 fast event context：删文件与展示都要回主循环
+              vim.schedule(function()
+                vim.fn.delete(inp)
+                done(res)
+              end)
+            end)
+          end
+
+          -- 全部分区回齐后一次性展示：每个分区一段，以 # 连接名 起头
+          local results, pending = {}, #group
+          local function present()
+            local parts, ok_n = {}, 0
+            for _, name in ipairs(group) do
+              local r = results[name]
+              parts[#parts + 1] = "# " .. name
+              if type(r) == "table" then
+                parts[#parts + 1] = "ERROR: " .. r.err
+              else
+                ok_n = ok_n + 1
+                -- 查询结果按分区各自 jq 格式化（整段一起 jq 会连 # 标题一起搅乱）
+                if rows then
+                  local pretty = vim.fn.system({ "jq", "." }, r)
+                  if vim.v.shell_error == 0 and pretty ~= "" then
+                    r = vim.trim(pretty)
+                  end
+                end
+                parts[#parts + 1] = r ~= "" and r or "(无输出)"
+              end
+            end
+            local out = table.concat(parts, "\n")
+            vim.fn.setreg("+", out)
+            vim.fn.setreg('"', out)
+            local f = vim.fn.tempname() .. ".txt"
+            vim.fn.writefile(vim.split(out, "\n"), f)
+            vim.cmd("pedit " .. vim.fn.fnameescape(f))
+            local pb = vim.fn.bufnr(f)
+            if pb > 0 then
+              vim.bo[pb].modifiable = false -- 纯展示，防误改/防自动保存
+            end
+            vim.notify(
+              string.format("多分区执行完成：%d/%d 成功（已复制）", ok_n, #group),
+              ok_n == #group and vim.log.levels.INFO or vim.log.levels.WARN,
+              { title = "DB" }
+            )
+          end
+
+          for _, name in ipairs(group) do
+            start_shard(name, function(res)
+              local ok = type(res) == "table"
+              local out = (ok and res.stdout) or ""
+              local err = (ok and res.stderr) or ""
+              if ok and res.code == 0 then
+                results[name] = vim.trim(out)
+              else
+                results[name] = { err = vim.trim(err ~= "" and err or out) }
+              end
+              pending = pending - 1
+              if pending == 0 then
+                present()
+              end
+            end)
+          end
+        end
+
         vim.keymap.set("x", "q", function()
           -- visual 下先退出以锁住所选行，range 取可视选区
           vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
           execute_sql(buffer_sql("'<,'>"))
         end, { buffer = buf, desc = "DB: 执行选中 SQL（走选中连接）" })
         vim.keymap.set("n", "q", function()
-          -- 光标所在行归属的完整语句；光标不在任何语句内（空白行）则整个 buffer
-          execute_sql(statement_at_cursor(buf) or buffer_sql("%"))
-        end, { buffer = buf, desc = "DB: 执行光标所在语句（无则整个 buffer）" })
+          execute_sql(target_sql())
+        end, { buffer = buf, desc = "DB: 单库执行（q 是前缀，单独按需等 timeoutlen）" })
+        vim.keymap.set("n", "qq", function()
+          execute_sql(target_sql())
+        end, { buffer = buf, desc = "DB: 单库执行当前连接（两键，无延迟）" })
+        vim.keymap.set("n", "qw", function()
+          execute_shards(target_sql())
+        end, { buffer = buf, desc = "DB: 多分区执行（同名分区族所有库）" })
 
         -- K：悬浮显示光标下对象结构（走本地连接）
         vim.keymap.set("n", "K", hover_object, {
