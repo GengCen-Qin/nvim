@@ -8,7 +8,8 @@
 --   * 用 `git worktree list --porcelain` 解析，格式稳定、不怕列对齐漂移。
 --   * 用 `git rev-parse --show-toplevel` 找 git 根：git 自己判定，可靠，
 --     也完美兼容从某个 worktree 内部运行的情形。
---   * 显式用 Snacks.picker.select 做候选列表（可模糊搜索）；未装则退回 vim.ui.select。
+--   * 用 vim.ui.select 做候选列表（可模糊搜索）；全局 picker 是 fzf-lua，
+--     它的 editor.fzf extra 会自动把 vim.ui.select 接管成 fzf 界面。
 --   * 切目录用 nvim_set_current_dir（等价 :cd，全局生效，不经过 cdpath）。
 local M = {}
 
@@ -64,24 +65,13 @@ function M.switch()
     return { label = string.format("%s%-24s %s", mark, name, branch), path = it.path, branch = it.branch }
   end, items)
 
-  -- 优先用 snacks picker 选择（可模糊搜索）；未装则退回 vim.ui.select
-  local ok, snacks = pcall(require, "snacks")
-  local select = (ok and snacks.picker and snacks.picker.select) or vim.ui.select
-
-  select(choices, {
+  -- 用 vim.ui.select 选（可模糊搜索）；全局 picker 是 fzf-lua，
+  -- LazyVim 的 editor.fzf extra 会把 vim.ui.select 接管成 fzf 界面
+  vim.ui.select(choices, {
     prompt = "选择 git worktree",
     format_item = function(it)
       return it.label
     end,
-    -- 放大展示框：比默认 select 预设更宽更高（默认宽 50% / 高 40%）
-    snacks = {
-      layout = {
-        width = 0.65,
-        min_width = 100,
-        max_width = 160,
-        height = 0.55,
-      },
-    },
   }, function(choice)
     if not choice then
       return
