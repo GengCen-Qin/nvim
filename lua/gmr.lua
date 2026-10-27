@@ -180,6 +180,7 @@ local function choose_target(branch, issue_key, repo_name, assignee, reviewer)
 end
 
 pick_target = function(targets, rec, branch, issue_key, repo_name, assignee, reviewer)
+  local ok, snacks = pcall(require, "snacks")
   local prompt = ("MR target branch (recommended: %s)"):format(rec)
 
   local function on_choice(target)
@@ -189,13 +190,22 @@ pick_target = function(targets, rec, branch, issue_key, repo_name, assignee, rev
     prompt_description(branch, issue_key, repo_name, target, assignee, reviewer)
   end
 
-  -- 全局 picker 是 fzf-lua，editor.fzf extra 会把 vim.ui.select 接管成 fzf 界面
-  vim.ui.select(targets, {
-    prompt = prompt,
-    format_item = function(t)
-      return (t == rec and "● " or "  ") .. t
-    end,
-  }, on_choice)
+  if ok and snacks and snacks.picker and snacks.picker.select then
+    snacks.picker.select(targets, {
+      prompt = prompt,
+      format_item = function(t)
+        return (t == rec and "● " or "  ") .. t
+      end,
+      snacks = { layout = { width = 0.6, min_width = 80, height = 0.5 } },
+    }, on_choice)
+  else
+    vim.ui.select(targets, {
+      prompt = prompt,
+      format_item = function(t)
+        return (t == rec and "● " or "  ") .. t
+      end,
+    }, on_choice)
+  end
 end
 
 -- 第 2 步：输入描述，然后自动往下走
