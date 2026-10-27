@@ -15,6 +15,9 @@ local WINSEPARATOR_VERT = "▌"
 -- 默认覆盖 catppuccin-frappe 的 base(#303446)，换成偏蓝灰的 #303841。
 local BG = "#303841"
 
+-- 函数相关高亮（treesitter @function 系列 + LSP function 语义token，改这里即可调整色值）
+local FUNCTION_FG = "#FCCD78"
+
 vim.api.nvim_create_autocmd("ColorScheme", {
   group = vim.api.nvim_create_augroup("UserCommentColor", { clear = true }),
   callback = function()
@@ -33,6 +36,31 @@ vim.api.nvim_create_autocmd("ColorScheme", {
     end
 
     vim.api.nvim_set_hl(0, "WinSeparator", { fg = WINSEPARATOR_FG, bold = true })
+
+    -- 函数高亮统一为 FUNCTION_FG
+    for _, group in ipairs({
+      "Function",
+      "@function",
+      "@function.builtin",
+      "@function.call",
+      "@function.macro",
+      "@function.method",
+      "@function.method.call",
+      "@lsp.type.function",
+    }) do
+      vim.api.nvim_set_hl(0, group, { fg = FUNCTION_FG })
+    end
+
+    -- 类/类型高亮统一为 FUNCTION_FG
+    for _, group in ipairs({
+      "@type",
+      "@type.definition",
+      "@lsp.type.class",
+      "@lsp.type.type",
+      "@lsp.type.interface",
+    }) do
+      vim.api.nvim_set_hl(0, group, { fg = FUNCTION_FG })
+    end
 
     -- 覆盖整体背景色
     for _, group in ipairs({ "Normal", "NormalFloat", "NormalNC" }) do
