@@ -669,6 +669,11 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         -- conn = 选中的连接（执行目标，可能 TP）
         local exec_url = url_of(conn) -- 执行连接 URL
 
+        -- 固定 augroup + 重入清理：<leader>fq 再进已存在的 buffer 时，
+        -- 先把本 buffer 上旧的补全 autocmd 清掉再注册，避免重复叠加
+        local track_group = vim.api.nvim_create_augroup("DadbodSchemaTrack", { clear = false })
+        vim.api.nvim_clear_autocmds({ group = track_group, buffer = buf })
+
         -- 补全/结构连接：本地(非TP)映射；映射不到则回退到选中连接并提醒
         local comp_conn = local_conn_of(conn)
         local comp_url = comp_conn and url_of(comp_conn) or exec_url
@@ -796,6 +801,7 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         end
 
         vim.api.nvim_create_autocmd({ "TextChangedI", "TextChangedP", "CursorMovedI" }, {
+          group = track_group,
           buffer = buf,
           callback = refresh_table_tracking,
         })
@@ -1084,7 +1090,11 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
       -- 单独负责（不走 auto-save 节流），因为它是临时查询 buffer。
       -- 用 write! 强制覆盖：buffer 是新建的、没走过 read，否则每次都会问「Overwrite existing file?」。
       local function auto_write_sql(buf)
+        -- 同 setup_sql_buffer：固定 augroup + 重入清理，避免重复注册自动保存
+        local write_group = vim.api.nvim_create_augroup("DadbodSchemaAutoWrite", { clear = false })
+        vim.api.nvim_clear_autocmds({ group = write_group, buffer = buf })
         vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "InsertLeave" }, {
+          group = write_group,
           buffer = buf,
           callback = function()
             if vim.bo[buf].modified then
