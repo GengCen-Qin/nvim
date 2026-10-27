@@ -4,6 +4,8 @@
 -- 列出影响该行区间的全部提交；预览只展示该提交对这几行的改动（而不是整个提交），
 -- 回车在独立 buffer 打开该提交的完整 view + diff。
 --
+-- 列表每行：修改人 → jira 编号 → 提交信息 → 日期 → commit。
+--
 -- 原理：`git log -p -L <start>,<end>:<file>` 一次拿到该行区间的全部提交，
 -- 每个提交后面跟着的 patch 就是 git 从当前版本追踪出来的、恰好覆盖这几行的改动。
 local M = {}
@@ -76,6 +78,47 @@ local function collect(opts)
   return items
 end
 
+-- jira 编号：GI-153025、TP-PAS-3055 这类「大写字母段 + 数字」的编号
+local JIRA = "%f[%w][A-Z][A-Z0-9_%-]*%-%d+"
+
+---从提交信息里取出 jira 编号；编号在开头时顺带从信息里剥掉，避免列表里重复
+---@param msg string
+---@return string|nil, string
+local function split_jira(msg)
+  local s, e = msg:find(JIRA)
+  if not s then
+    return nil, msg
+  end
+  local jira = msg:sub(s, e)
+  if s == 1 then
+    return jira, (msg:sub(e + 1):gsub("^[%s:%-_]+", ""))
+  end
+  return jira, msg
+end
+
+local AUTHOR_WIDTH, JIRA_WIDTH = 16, 11
+
+---列表展示：修改人放最前，紧跟 jira 编号，然后是提交信息、日期、commit
+---@param item snacks.picker.finder.Item
+---@param picker snacks.picker
+---@return snacks.picker.Highlight[]
+function M.format(item, picker)
+  local a = Snacks.picker.util.align
+  local jira, msg = split_jira(item.msg or "")
+  local ret = {} ---@type snacks.picker.Highlight[]
+  ret[#ret + 1] = { picker.opts.icons.git.commit, "SnacksPickerGitCommit" }
+  ret[#ret + 1] = { a(item.author or "", AUTHOR_WIDTH, { truncate = true }), "SnacksPickerGitAuthor" }
+  ret[#ret + 1] = { " " }
+  ret[#ret + 1] = { a(jira or "", JIRA_WIDTH), "SnacksPickerGitIssue" }
+  ret[#ret + 1] = { " " }
+  Snacks.picker.highlight.extend(ret, require("snacks.picker.format").commit_message({ msg = msg }, picker))
+  if item.date then
+    ret[#ret + 1] = { " " .. item.date, "SnacksPickerGitDate" }
+  end
+  ret[#ret + 1] = { " " .. item.commit, "SnacksPickerGitCommit" }
+  return ret
+end
+
 ---预览：只展示该提交对所选行范围的改动，而不是整个提交
 ---@param ctx snacks.picker.preview.ctx
 function M.preview(ctx)
@@ -109,7 +152,14 @@ local function open_commit_diff(item)
   end
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(out.stdout, "\n", { plain = true }))
-  vim.api.nvim_buf_set_name(buf, ("git show %s"):format(item.commit))
+  -- 同一个 commit 会被反复查看，buffer 名不能重复（E95），重名时加序号
+  local base = ("git show %s"):format(item.commit)
+  local name, n = base, 1
+  while vim.fn.bufnr(name) ~= -1 do
+    n = n + 1
+    name = ("%s (%d)"):format(base, n)
+  end
+  vim.api.nvim_buf_set_name(buf, name)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].modifiable = false
   vim.bo[buf].filetype = "git"
@@ -163,7 +213,7 @@ function M.open()
   Snacks.picker.pick({
     cwd = cwd,
     items = items,
-    format = "git_log",
+    format = M.format,
     preview = M.preview,
     confirm = function(picker, item)
       picker:close()
