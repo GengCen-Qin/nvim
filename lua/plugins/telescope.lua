@@ -11,6 +11,43 @@
 --   * 只有你自己的 <leader>/ 用 telescope（按需加载，不占启动时间）。
 -- 若想让 telescope 全面接管，改为启用 extra 即可：
 --   { import = "lazyvim.plugins.extras.editor.telescope" }
+
+-- 搜索时过滤掉的代码文件（与 snacks.lua 里 picker 的 exclude 保持一致，
+-- 两处都改才能保证 <leader>/ 和 snacks 各处查找结果一样）。
+-- 这里转成 rg 的 --glob=!xxx 参数，字面匹配，无正则。
+local exclude = {
+  "*.cpp",
+  "*.cc",
+  "*.cxx",
+  "*.hpp",
+  "*.h",
+  "*.js",
+  "*.mjs",
+  "*.ts",
+  "*.cs",
+  "*.csproj",
+}
+local globs = {}
+for _, g in ipairs(exclude) do
+  globs[#globs + 1] = "--glob=!" .. g
+end
+
+-- live_grep 交给 rg 的参数：前 8 个照抄 telescope 默认值（只多 --fixed-strings），
+-- 末尾拼上上面的排除 glob。
+local vimgrep_args = {
+  "rg",
+  "--color=never",
+  "--no-heading",
+  "--with-filename",
+  "--line-number",
+  "--column",
+  "--smart-case",
+  "--fixed-strings",
+}
+for _, g in ipairs(globs) do
+  vimgrep_args[#vimgrep_args + 1] = g
+end
+
 return {
   {
     "nvim-telescope/telescope.nvim",
@@ -36,18 +73,9 @@ return {
           -- live_grep 默认把输入原样交给 ripgrep 当正则，粘代码片段时里面的
           -- ( { " . 等元字符会让 rg 报 regex parse error 或匹配到别处，
           -- 表现就是「明明有这段代码却搜不到」。
-          -- 这里整条命令照抄 telescope 默认值，只多一个 --fixed-strings
-          -- （--smart-case 在字面模式下依然生效：全小写则忽略大小写）。
-          vimgrep_arguments = {
-            "rg",
-            "--color=never",
-            "--no-heading",
-            "--with-filename",
-            "--line-number",
-            "--column",
-            "--smart-case",
-            "--fixed-strings",
-          },
+          -- 这里整条命令在 vimgrep_args 里（见文件顶部）：
+          -- 前 8 个是 telescope 默认值加上 --fixed-strings，末尾是排除 glob。
+          vimgrep_arguments = vimgrep_args,
         },
       })
       -- fzf 扩展没构建成功也不影响 telescope 基本可用，故 pcall 兜住
