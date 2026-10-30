@@ -26,10 +26,10 @@ local M = {}
 
 local NS = vim.api.nvim_create_namespace("lazy_read")
 
--- 与 Sublime 版共用同一份数据。Sublime 跑在 Windows 上（家目录是 Windows 的），
--- 所以这里指向 /mnt/c/... 而不是 WSL 的 ~/.lazyRead，否则读不到之前写的注释。
--- 想换位置可在 setup({ notes_path = "..." }) 里覆盖。
-local DEFAULT_NOTES_PATH = "/mnt/c/Users/Sicheng/.lazyRead/notes.json"
+-- Single shared notes db, now hosted in WSL to avoid reading a Windows drive.
+-- Sublime (Windows) points at the same file via \\wsl.localhost\Ubuntu\home\lucas\.lazyRead.
+-- Override in setup({ notes_path = "..." }) if needed.
+local DEFAULT_NOTES_PATH = vim.fn.expand("~/.lazyRead/notes.json")
 local NOTES_PATH = DEFAULT_NOTES_PATH
 
 M.opts = {
