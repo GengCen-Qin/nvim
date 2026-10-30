@@ -19,7 +19,9 @@
 --                  * normal 模式 qw：同一段 SQL 在当前连接的分区族里「多库并行执行」
 --                    （tp_pas -> tp_pas/tp_pas_2/tp_pas_3/tp_pas_4）。
 --                    族由连接名推导（同 base 名的连接），族里只有自己就退化为单库；
---                    结果按分区分段展示（# 连接名 起头），并汇报成功/失败数。
+--                    查询类把各分区的 JSON 结果合并成一个大的 JSON 数组
+--                    （[ {…}, {…}, … ]，顺序同分区族），非查询类保持每段 # 连接名
+--                    展示；成功后复制到剪贴板，失败/异常走 notify 汇报。
 --                    目标是「光标所在语句」，与 q 一致。
 --                    注意别用 Q：Q 是 nvim 默认的 Ex mode，这版 nvim 下会直接报
 --                    E354: Invalid register name。
@@ -1010,28 +1012,59 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
             end)
           end
 
-          -- 全部分区回齐后一次性展示：每个分区一段，以 # 连接名 起头
+          -- 全部分区回齐后一次性展示。
+          -- 查询类：把各分区已是 json_agg 数组的结果合并成一个大数组
+          --   [ {…}, {…}, … ]（顺序同分区族，失败分区不并入）。
+          -- 用字符串拼接剥掉每分区外层的 [] 再合并，不走 decode/encode，
+          -- 避免 bigint 等数值经 Lua double 丢精度。
+          -- 非查询类：保持每分区一段、以 # 连接名 起头。
+          -- 失败/异常（含「结果不是 JSON 数组」）统一走 notify 汇报。
           local results, pending = {}, #group
           local function present()
-            local parts, ok_n = {}, 0
-            for _, name in ipairs(group) do
-              local r = results[name]
-              parts[#parts + 1] = "# " .. name
-              if type(r) == "table" then
-                parts[#parts + 1] = "ERROR: " .. r.err
-              else
-                ok_n = ok_n + 1
-                -- 查询结果按分区各自 jq 格式化（整段一起 jq 会连 # 标题一起搅乱）
-                if rows then
-                  local pretty = vim.fn.system({ "jq", "." }, r)
-                  if vim.v.shell_error == 0 and pretty ~= "" then
-                    r = vim.trim(pretty)
+            local ok_n, fail_msgs = 0, {}
+            local function mark_fail(name, msg)
+              fail_msgs[#fail_msgs + 1] = name .. ": " .. msg
+            end
+
+            local out
+            if rows then
+              local parts = {}
+              for _, name in ipairs(group) do
+                local r = results[name]
+                if type(r) == "table" then
+                  mark_fail(name, r.err:gsub("\n.*", ""))
+                else
+                  local body = r:match("^%[([%s%S]*)%]$") -- r 已 trim
+                  if body then
+                    ok_n = ok_n + 1
+                    if body ~= "" then -- [] 的空体丢弃，避免拼出悬空逗号
+                      parts[#parts + 1] = body
+                    end
+                  else
+                    mark_fail(name, "结果不是 JSON 数组")
                   end
                 end
-                parts[#parts + 1] = r ~= "" and r or "(无输出)"
               end
+              out = "[" .. table.concat(parts, ",") .. "]"
+              local pretty = vim.fn.system({ "jq", "." }, out)
+              if vim.v.shell_error == 0 and pretty ~= "" then
+                out = vim.trim(pretty)
+              end
+            else
+              local parts = {}
+              for _, name in ipairs(group) do
+                local r = results[name]
+                parts[#parts + 1] = "# " .. name
+                if type(r) == "table" then
+                  parts[#parts + 1] = "ERROR: " .. r.err
+                else
+                  ok_n = ok_n + 1
+                  parts[#parts + 1] = r ~= "" and r or "(无输出)"
+                end
+              end
+              out = table.concat(parts, "\n")
             end
-            local out = table.concat(parts, "\n")
+
             vim.fn.setreg("+", out)
             vim.fn.setreg('"', out)
             local f = vim.fn.tempname() .. ".txt"
@@ -1041,8 +1074,12 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
             if pb > 0 then
               vim.bo[pb].modifiable = false -- 纯展示，防误改/防自动保存
             end
+            local msg = string.format("多分区执行完成：%d/%d 成功（已复制）", ok_n, #group)
+            if #fail_msgs > 0 then
+              msg = msg .. "\n" .. table.concat(fail_msgs, "\n")
+            end
             vim.notify(
-              string.format("多分区执行完成：%d/%d 成功（已复制）", ok_n, #group),
+              msg,
               ok_n == #group and vim.log.levels.INFO or vim.log.levels.WARN,
               { title = "DB" }
             )
