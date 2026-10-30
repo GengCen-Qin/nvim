@@ -1,9 +1,10 @@
 -- snacks picker 配置
 --
--- 查找时不想看的代码文件扩展名（字面匹配，无正则）。
--- <leader><leader> 找文件 / 全局搜索默认都走 snacks；本表同时被 telescope.lua
--- （<leader>/ 自定义全局搜索）引用，保证各处过滤一致。
+-- 查找时不想看的代码文件/目录（字面匹配，无正则，目录名整目录排除）。
+-- <leader><leader> 找文件、<leader>/ 全局搜索（见 keymaps.lua，regex=false 即字面匹配）
+-- 统一都走 snacks.picker，exclude 只在这里维护一份。
 local exclude = {
+  "cpp", -- 整个 cpp/ 目录（其下还有 .sln/.vcxproj/Makefile 等非源码文件）
   "*.cpp",
   "*.cc",
   "*.cxx",
@@ -15,9 +16,6 @@ local exclude = {
   "*.cs",
   "*.csproj",
 }
-
--- 供其它插件文件复用（telescope.lua 用它拼 --glob=!xxx）
-_G.nvim_files_exclude = exclude
 
 return {
   "folke/snacks.nvim",
