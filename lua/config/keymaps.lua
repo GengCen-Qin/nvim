@@ -63,8 +63,11 @@ keymap("n", "<C-CR>", "o<Esc>k", { desc = "Insert line below and enter insert mo
 --
 --
 
--- space + /: 全局搜索 (live_grep)，比 LazyVim 默认的 <leader>sg 少按一次
-keymap("n", "<leader>/", "<cmd>Telescope live_grep<cr>", { desc = "Global Search (Live Grep)" })
+-- space + /: 全局搜索（字面匹配，非正则），比 LazyVim 默认的 <leader>sg 少按一次
+-- 与 <leader><leader> 等键位统一走 snacks.picker，exclude 只在 snacks.lua 维护一处
+keymap("n", "<leader>/", function()
+  Snacks.picker.grep({ regex = false })
+end, { desc = "Global Search (literal)" })
 
 -- u: 撤回 (Undo) —— nvim 内置，明示意图
 keymap("n", "u", "u", { desc = "Undo" })
