@@ -162,3 +162,12 @@ vim.api.nvim_create_autocmd("LspAttach", {
     keymap("n", "<leader>ca", "<cmd>CopyAbsolutePath<CR>", { buffer = args.buf, desc = "Copy absolute path" })
   end,
 })
+
+-- 11. Ctrl + /: toggle comment (built-in gcc / gc, no plugin needed)
+-- Most terminals send <C-_> (0x1F) for Ctrl+/; terminals speaking the kitty
+-- keyboard protocol send a real <C-/>. Bind both so the key works everywhere.
+-- Only n/x modes: t-mode <C-/> (LazyVim: hide terminal) is left alone.
+for _, lhs in ipairs({ "<C-/>", "<C-_>" }) do
+  keymap("n", lhs, "gcc", { remap = true, desc = "Toggle comment line" })
+  keymap("x", lhs, "gc", { remap = true, desc = "Toggle comment" })
+end
