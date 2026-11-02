@@ -108,6 +108,54 @@ keymap("n", "<leader>ca", "<cmd>CopyAbsolutePath<CR>", { desc = "Copy absolute p
 
 -- LazyVim 在 LspAttach 时用 buffer 局部键位设了 <leader>cr(Rename)/<leader>ca(Code Action)，
 -- 会盖掉上面的全局绑定。本文件在 VeryLazy 加载，注册的 autocmd 晚于 LazyVim，故在其之后生效。
+-- 10. Copy text object to system clipboard
+-- ss: copy word under cursor (y i w)
+keymap("n", "ss", '"+yiw', { desc = "Copy word under cursor" })
+
+-- sw: copy inside quotes (single or double)
+-- Determines the quote char on the cursor line: prefers being inside a
+-- quote-pair (last opening quote behind the cursor), else the nearest
+-- pair boundary, else defaults to double quotes.
+keymap("n", "sw", function()
+  local line = vim.api.nvim_get_current_line()
+  local p = vim.api.nvim_win_get_cursor(0)[2] + 1 -- 1-based cursor position
+
+  local regions, open = {}, nil
+  for i = 1, #line do
+    local ch = line:sub(i, i)
+    if ch == '"' or ch == "'" then
+      if open then
+        regions[#regions + 1] = { open = open, close = i, quote = line:sub(open, open) }
+        open = nil
+      else
+        open = i
+      end
+    end
+  end
+
+  -- inside a pair: the last opening quote behind the cursor is the region
+  local quote
+  for _, r in ipairs(regions) do
+    if p > r.open and p < r.close then
+      quote = r.quote
+    end
+  end
+
+  if not quote then
+    local best, bestd
+    for _, r in ipairs(regions) do
+      local d = math.min(math.abs(p - r.open), math.abs(p - r.close))
+      if not bestd or d < bestd then best, bestd = r, d end
+    end
+    quote = best and best.quote or '"'
+  end
+
+  local ok = pcall(vim.cmd.normal, { '"+yi' .. quote, bang = true })
+  if not ok then
+    vim.notify("No " .. quote .. " quoted text found", vim.log.levels.WARN)
+  end
+end, { desc = "Copy inside quotes" })
+
 vim.api.nvim_create_autocmd("LspAttach", {
   callback = function(args)
     keymap("n", "<leader>cr", "<cmd>CopyRelativePath<CR>", { buffer = args.buf, desc = "Copy relative path" })
