@@ -7,6 +7,9 @@
 -- 交互：Snacks picker 列出 MR，右侧预览是该 MR 的详情（字段与 glab mr view 一致：
 -- 标题/状态/作者/指派/评审/分支/评论数/链接/描述），回车在新 tab 打开一个
 -- ft=diff 的 buffer 展示 glab mr diff 的内容。
+-- diff buffer 里按 o 跳到对应源码文件的新版本行位置（方便直接改代码），
+-- [ / ] 在改动块之间上下跳（支持 3] 这样的次数前缀，落点回中）；
+-- 当前分支不是 MR 的 source 分支时会提示行号可能对不上，但照常打开本地文件。
 -- 列表里已合并 / 已关闭的标 [merged] / [closed]，草稿标 [draft]；
 -- 未合并且有冲突的（has_conflicts）整行标红并加 [conflict]，一眼能看出哪个要处理。
 --
@@ -265,6 +268,127 @@ end
 -- diff buffer
 ----------------------------------------------------------------------
 
+---按完整名字找 buffer（伪 URI 名交给 :b 的模糊匹配不可靠，这里精确比对）
+---@param name string
+---@return integer|nil
+local function buf_by_name(name)
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(b) == name then
+      return b
+    end
+  end
+end
+
+---解析当前 diff buffer：返回 行号→{path,new} 的映射，以及每个连续增删块的首行列表。
+---glab mr diff 输出是精简 unified diff（--- / +++ / @@，没有 diff --git 头），
+---路径相对仓库根；new 是 + 侧（MR 新版本）的行号，按 hunk 逐行累计出来。
+---连续 + / - 行算一个改动块（[ ] 跳转用它定位首行），遇到上下文行或换 hunk 就断开。
+---@param buf integer
+---@return table<integer,{path:string|nil,new:integer}>, integer[]
+local function parse_meta(buf)
+  local meta, targets = {}, {}
+  local path
+  local old_ln, new_ln
+  local changed = false -- 上一个内容行是否是 +/-
+  for i, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if line:match("^%+%+%+ ") then
+      local p = line:sub(5)
+      path = (p ~= "/dev/null") and p:gsub("^[ab]/", "") or nil
+      changed = false
+    elseif line:match("^@@ ") then
+      -- 4 个捕获依次是 旧起始/旧行数/新起始/新行数，只取起始两个
+      local a, _, b = line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
+      if a then
+        old_ln, new_ln = tonumber(a) - 1, tonumber(b) - 1
+        meta[i] = { path = path, new = math.max(1, tonumber(b)) }
+      end
+      changed = false
+    elseif path then
+      local c = line:sub(1, 1)
+      if c == "-" then
+        old_ln = old_ln + 1
+        meta[i] = { path = path, new = math.max(1, new_ln) }
+        if not changed then targets[#targets + 1] = i end
+        changed = true
+      elseif c == "+" then
+        new_ln = new_ln + 1
+        meta[i] = { path = path, new = new_ln }
+        if not changed then targets[#targets + 1] = i end
+        changed = true
+      elseif c == " " or c == "" then
+        old_ln = old_ln + 1
+        new_ln = new_ln + 1
+        meta[i] = { path = path, new = new_ln }
+        changed = false
+      end
+    end
+  end
+  return meta, targets
+end
+
+---o：跳到光标所在改动对应的源码位置（工作区的新版本文件 + 行号）。
+---分支不是 MR 的 source 分支时，本地内容和 MR 对不上，先提示行号可能错位。
+local function open_file_at_cursor()
+  local buf = vim.api.nvim_get_current_buf()
+  local root = vim.b[buf].gitlab_mr_root
+  if not root then
+    return notify("这不是 MR diff buffer", vim.log.levels.WARN)
+  end
+
+  local out = vim.system({ "git", "-C", root, "branch", "--show-current" }, { text = true }):wait(3000)
+  local cur = vim.trim(out.stdout or "")
+  local source = vim.b[buf].gitlab_mr_source
+  if cur ~= "" and source and source ~= "" and cur ~= source then
+    notify(("当前分支 %s 不是 MR 的 source 分支 %s，行号可能与 MR 对不上"):format(cur, source), vim.log.levels.WARN)
+  end
+
+  local m = parse_meta(buf)[vim.api.nvim_win_get_cursor(0)[1]]
+  if not m then
+    return notify("光标不在改动行", vim.log.levels.WARN)
+  end
+  if not m.path then
+    return notify("该文件在 MR 里被删除，没有可跳的行", vim.log.levels.WARN)
+  end
+  local fpath = root .. "/" .. m.path
+  if vim.fn.filereadable(fpath) ~= 1 then
+    return notify(("本地没有 %s，先切到 %s 分支再试"):format(m.path, source or "source"), vim.log.levels.WARN)
+  end
+  vim.cmd("edit " .. vim.fn.fnameescape(fpath))
+  vim.api.nvim_win_set_cursor(0, { math.min(m.new, vim.api.nvim_buf_line_count(0)), 0 })
+end
+
+---[ / ]：在改动块之间跳转（direction 1 向下 / -1 向上），支持次数前缀，落点整屏回中。
+---与 git-review 的 space bb 一致：跳的是每个连续增删块的起始行，到末尾环绕。
+---@param direction integer
+local function jump(direction)
+  local buf = vim.api.nvim_get_current_buf()
+  if not vim.b[buf].gitlab_mr_root then
+    return notify("这不是 MR diff buffer", vim.log.levels.WARN)
+  end
+  local _, targets = parse_meta(buf)
+  if #targets == 0 then
+    return notify("没有可跳的改动", vim.log.levels.INFO)
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local count = vim.v.count1
+  for _ = 1, count do
+    local next_
+    if direction > 0 then
+      for _, t in ipairs(targets) do
+        if t > row then next_ = t; break end
+      end
+      row = next_ or targets[1]
+    else
+      for i = #targets, 1, -1 do
+        if targets[i] < row then next_ = targets[i]; break end
+      end
+      row = next_ or targets[#targets]
+    end
+  end
+  vim.api.nvim_win_set_cursor(0, { row, 0 })
+  vim.cmd("normal! zz")
+end
+
 ---在新 tab 打开一个 buffer 展示 glab mr diff
 ---@param item table
 function M.open_diff(item)
@@ -275,18 +399,41 @@ function M.open_diff(item)
     return
   end
 
+  -- 用伪 URI 当 buffer 名：状态栏能看出是哪个 MR，又不会被当成项目里的真实文件
+  -- （相对名会被 nvim 解析到 cwd 下）。
+  local name = ("glab-mr://%d.diff"):format(mr.iid)
+  local existing = buf_by_name(name)
+  if existing then
+    -- 同一个 MR 已经开过：跳回原来的 buffer，别再造一个同名的
+    local win = vim.fn.bufwinid(existing)
+    if win ~= -1 then
+      vim.api.nvim_set_current_win(win)
+    else
+      vim.api.nvim_set_current_buf(existing)
+    end
+    return
+  end
+
   vim.cmd("tabnew")
   local buf = vim.api.nvim_get_current_buf()
   vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
+  -- hide 而不是 wipe：wipe 会在 buffer 不再显示于任何窗口时把它整个删掉，
+  -- 于是「在这个 tab 里打开别的文件」就会顺手把 diff 丢掉。
+  vim.bo[buf].bufhidden = "hide"
   vim.bo[buf].swapfile = false
-  -- 用伪 URI 当 buffer 名：状态栏能看出是哪个 MR，又不会被当成项目里的真实文件
-  -- （相对名会被 nvim 解析到 cwd 下）。同一 MR 再开一次时同名会冲突，忽略即可。
-  pcall(vim.api.nvim_buf_set_name, buf, ("glab-mr://%d.diff"):format(mr.iid))
+  pcall(vim.api.nvim_buf_set_name, buf, name)
   vim.bo[buf].filetype = "diff"
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "loading diff of !" .. mr.iid .. " ..." })
   vim.bo[buf].modifiable = false
+
+  -- b: 变量随 buffer 存活，o 跳转源码时用；source 分支不同时行号可能对不上，要提示
+  vim.b[buf].gitlab_mr_root = root
+  vim.b[buf].gitlab_mr_iid = mr.iid
+  vim.b[buf].gitlab_mr_source = mr.source_branch
+  vim.keymap.set("n", "o", open_file_at_cursor, { buffer = buf, silent = true })
+  vim.keymap.set("n", "]", function() jump(1) end, { buffer = buf, silent = true })
+  vim.keymap.set("n", "[", function() jump(-1) end, { buffer = buf, silent = true })
 
   spinner_start("fetching diff of !" .. mr.iid .. " ...")
   glab({ "mr", "diff", tostring(mr.iid) }, root, function(out)
