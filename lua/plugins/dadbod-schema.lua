@@ -674,6 +674,10 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         -- conn = 选中的连接（执行目标，可能 TP）
         local exec_url = url_of(conn) -- 执行连接 URL
 
+        -- bufadd 建的 buffer 默认 unlisted：不进 bufferline / :ls，
+        -- 跳走后就找不回来。显式列为 listed，保证能随时切回。
+        vim.bo[buf].buflisted = true
+
         -- 固定 augroup + 重入清理：<leader>fq 再进已存在的 buffer 时，
         -- 先把本 buffer 上旧的补全 autocmd 清掉再注册，避免重复叠加
         local track_group = vim.api.nvim_create_augroup("DadbodSchemaTrack", { clear = false })
