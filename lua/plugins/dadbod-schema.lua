@@ -30,9 +30,10 @@
 --                    q 或 Esc 关闭，回到 SQL buffer
 --   执行（q）：查询类语句（SELECT/WITH/VALUES/TABLE）只执行一次，直接以 JSON
 --                  * 包成 json_agg(row_to_json(t))，结果经 jq 格式化后进系统
---                    剪贴板（+ 无名寄存器），并在预览窗口展示（含空结果集 []）
+--                    剪贴板（+ 无名寄存器），并在悬浮窗展示（含空结果集 []）
 --                  * 一次查询 = 一次执行，不再为拿 JSON 重跑第二遍
---                  * 非查询语句（UPDATE/DDL 等）回退 dadbod 原生执行（正常表格）
+--                  * 非查询语句（UPDATE/DDL 等）同样 psql 直接执行，
+--                    结果也统一在悬浮窗展示；Esc/q 关闭悬浮窗
 --   ruby 文件 normal 模式 K（仅 filetype=ruby，其它文件类型不绑）：
 --                  光标停在模型类名（如 PasAccount）上按 K，按
 --                  「显式 self.table_name 优先、否则 Rails tableize 推导」
@@ -208,18 +209,20 @@ return {
         return vim.fn["db#systemlist"](cmd)
       end
 
-      -- 用悬浮窗展示结构/源码（<leader>fd 与 K 共用）。
+      -- 用悬浮窗展示结构/源码/查询结果（<leader>fd 与 K 与执行结果共用）。
       -- 看完 q 或 Esc 关闭，焦点回到原来的窗口/buffer。
+      -- ft 可选（默认 "sql"）：查询结果传 "json"/"text" 以获得对应高亮。
       -- 注意：这里不能用 nvim_buf_call 包裹——它会在回调返回时把当前窗口还原回
       -- SQL 窗口，导致浮窗拿不到焦点、Esc 落到 SQL buffer 上关不掉浮窗。
-      local function show_float(lines, title)
+      local function show_float(lines, title, ft)
         local width = math.min(120, math.max(60, vim.o.columns - 4))
         local height = math.min(vim.o.lines - 8, #lines + 2)
         local buf = vim.api.nvim_create_buf(false, true)
         vim.bo[buf].bufhidden = "wipe"
         vim.bo[buf].swapfile = false
-        vim.bo[buf].filetype = "sql"
+        vim.bo[buf].filetype = ft or "sql"
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        vim.bo[buf].modifiable = false -- 纯展示，防误改/防自动保存
         pcall(vim.api.nvim_buf_set_name, buf, "db-float://" .. title)
         local win = vim.api.nvim_open_win(buf, true, {
           relative = "editor",
@@ -827,15 +830,26 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           return kw == "SELECT" or kw == "WITH" or kw == "VALUES" or kw == "TABLE"
         end
 
-        -- 非查询语句（UPDATE/DDL 等）包不进子查询：落临时文件交给 dadbod 原生执行。
-        -- dadbod 把这个文件直接当输入文件用，执行期间不能删，留给 /tmp 自己回收。
-        local function run_native(sql)
+        -- 非查询语句（UPDATE/DDL 等）包不进子查询：直接 psql 执行，
+        -- 结果与查询类一样统一在悬浮窗展示（成功给 stdout，失败给 stderr）。
+        local function run_native(sql, url)
           local f = vim.fn.tempname() .. ".sql"
           vim.fn.writefile(vim.split(sql, "\n"), f)
-          vim.cmd("DB b:db_exec_url < " .. vim.fn.fnameescape(f))
+          vim.system({
+            "psql", "-w", "--no-psqlrc", "-v", "ON_ERROR_STOP=1",
+            "--dbname=" .. url, "-f", f,
+          }, { text = true }, function(res)
+            vim.schedule(function()
+              vim.fn.delete(f)
+              local ok = type(res) == "table" and res.code == 0
+              local out = ok and vim.trim(res.stdout or "")
+                or vim.trim((res.stderr or "") ~= "" and res.stderr or (res.stdout or ""))
+              show_float(vim.split(out ~= "" and out or "(无输出)", "\n"), "执行结果", "text")
+            end)
+          end)
         end
 
-        -- 一次执行：把 SQL 包成 JSON 跑，结果复制到剪贴板 + 预览窗口展示
+        -- 一次执行：把 SQL 包成 JSON 跑，结果复制到剪贴板 + 悬浮窗展示
         local function run_as_json(sql, url)
           local inp = vim.fn.tempname() .. ".sql"
           vim.fn.writefile(vim.split(
@@ -852,9 +866,9 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
               vim.fn.delete(inp)
               local out = (type(res) == "table" and res.code == 0) and vim.trim(res.stdout or "") or nil
               if not out then
-                -- 不是可包装的查询：回退 dadbod 原生执行（正常表格展示）
+                -- 不是可包装的查询：回退原生执行（同样悬浮窗展示）
                 vim.notify("无法以 JSON 执行，回退普通查询", vim.log.levels.WARN, { title = "DB" })
-                run_native(sql)
+                run_native(sql, url)
                 return
               end
               -- jq 格式化（保留列顺序）；jq 不可用则保持单行
@@ -864,13 +878,7 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
               end
               vim.fn.setreg("+", out)
               vim.fn.setreg('"', out)
-              local f = vim.fn.tempname() .. ".json"
-              vim.fn.writefile(vim.split(out, "\n"), f)
-              vim.cmd("pedit " .. vim.fn.fnameescape(f))
-              local pb = vim.fn.bufnr(f)
-              if pb > 0 then
-                vim.bo[pb].modifiable = false -- 纯展示，防误改/防自动保存
-              end
+              show_float(vim.split(out, "\n"), "查询结果", "json")
               vim.notify("已复制为 JSON（" .. #out .. " 字符）", vim.log.levels.INFO, { title = "DB" })
             end)
           end)
@@ -953,7 +961,7 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           if is_result_query(sql) then
             run_as_json(sql, url)
           else
-            run_native(sql)
+            run_native(sql, url)
           end
         end
 
@@ -1067,13 +1075,11 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
 
             vim.fn.setreg("+", out)
             vim.fn.setreg('"', out)
-            local f = vim.fn.tempname() .. ".txt"
-            vim.fn.writefile(vim.split(out, "\n"), f)
-            vim.cmd("pedit " .. vim.fn.fnameescape(f))
-            local pb = vim.fn.bufnr(f)
-            if pb > 0 then
-              vim.bo[pb].modifiable = false -- 纯展示，防误改/防自动保存
-            end
+            show_float(
+              vim.split(out, "\n"),
+              rows and "查询结果（多分区）" or "执行结果（多分区）",
+              rows and "json" or "text"
+            )
             local msg = string.format("多分区执行完成：%d/%d 成功（已复制）", ok_n, #group)
             if #fail_msgs > 0 then
               msg = msg .. "\n" .. table.concat(fail_msgs, "\n")
