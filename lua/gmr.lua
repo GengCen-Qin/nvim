@@ -5,7 +5,8 @@
 --   1. 列出本地已有的 origin/* 远端跟踪分支，挑 MR 目标分支（推荐项排最前、标 ●）
 --      纯本地读取，不走网络；代价是列表为上次 fetch 的状态
 --   2. 输入 MR 描述
---   3. 之后全自动：抓 Jira title → push → glab mr create，成功给 MR 链接
+--   3. 确认是否以 draft 形式提交 MR（默认否，回车直接走正常创建）
+--   4. 之后全自动：抓 Jira title → push → glab mr create，成功给 MR 链接
 --      （不再要“确认提交”那一步）
 --
 -- 实现要点：
@@ -208,19 +209,28 @@ pick_target = function(targets, rec, branch, issue_key, repo_name, assignee, rev
   end
 end
 
--- 第 2 步：输入描述，然后自动往下走
+-- 第 2 步：输入描述，再问一次是否 draft，然后自动往下走
 prompt_description = function(branch, issue_key, repo_name, target, assignee, reviewer)
   vim.ui.input({ prompt = "MR Description: " }, function(description)
     if not description or vim.trim(description) == "" then
       msg("description cannot be empty.", vim.log.levels.ERROR)
       return
     end
-    fetch_title(branch, issue_key, repo_name, target, assignee, reviewer, vim.trim(description))
+    description = vim.trim(description)
+
+    -- 第 3 步：问是否 draft。No 排第一，回车即普通 MR；要 draft 需主动选 Yes
+    -- （不用 vim.ui.confirm：Snacks 接管 ui 后该函数拿不到）
+    vim.ui.select({ "No", "Yes" }, { prompt = "Create this MR as a draft?" }, function(choice)
+      if not choice then
+        return
+      end
+      fetch_title(branch, issue_key, repo_name, target, assignee, reviewer, description, choice == "Yes")
+    end)
   end)
 end
 
 -- 第 3 步：抓 Jira title（慢，带动画）→ 建 MR
-fetch_title = function(branch, issue_key, repo_name, target, assignee, reviewer, description)
+fetch_title = function(branch, issue_key, repo_name, target, assignee, reviewer, description, is_draft)
   spinner_start("Fetching Jira issue " .. issue_key .. "...")
   run({ "jira", "issue", "view", issue_key, "--raw" }, function(res)
     if res.code ~= 0 then
@@ -237,12 +247,12 @@ fetch_title = function(branch, issue_key, repo_name, target, assignee, reviewer,
       return
     end
 
-    create_mr(branch, target, assignee, reviewer, description, issue_key .. " " .. vim.trim(title))
+    create_mr(branch, target, assignee, reviewer, description, issue_key .. " " .. vim.trim(title), is_draft)
   end)
 end
 
 -- 第 4 步：push + glab mr create（都带动画）
-create_mr = function(branch, target, assignee, reviewer, description, mr_title)
+create_mr = function(branch, target, assignee, reviewer, description, mr_title, is_draft)
   spinner_update("Pushing '" .. branch .. "' to origin...")
   run({ "git", "push", "-u", "origin", branch }, function(push)
     if push.code ~= 0 then
@@ -251,8 +261,8 @@ create_mr = function(branch, target, assignee, reviewer, description, mr_title)
       return
     end
 
-    spinner_update("Creating merge request (target: " .. target .. ")...")
-    run({
+    spinner_update("Creating " .. (is_draft and "draft " or "") .. "merge request (target: " .. target .. ")...")
+    local args = {
       "glab", "mr", "create",
       "--source-branch", branch,
       "--target-branch", target,
@@ -262,7 +272,11 @@ create_mr = function(branch, target, assignee, reviewer, description, mr_title)
       "--reviewer", reviewer,
       "--remove-source-branch=true",
       "--squash-before-merge=true",
-    }, function(res)
+    }
+    if is_draft then
+      table.insert(args, "--draft")
+    end
+    run(args, function(res)
       spinner_stop()
       if res.code ~= 0 then
         msg("创建 MR 失败:\n" .. res.stderr, vim.log.levels.ERROR)
@@ -273,9 +287,9 @@ create_mr = function(branch, target, assignee, reviewer, description, mr_title)
       local out = (res.stdout or "") .. "\n" .. (res.stderr or "")
       local url = out:match("https?://%S+")
       if url then
-        msg("MR 创建成功: " .. url)
+        msg((is_draft and "Draft MR 创建成功: " or "MR 创建成功: ") .. url)
       else
-        msg("Merge request created successfully.")
+        msg(is_draft and "Draft merge request created successfully." or "Merge request created successfully.")
       end
     end)
   end)
