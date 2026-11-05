@@ -186,6 +186,26 @@ local function unquote(text)
   return nil
 end
 
+-- 安全取节点文本：树可能落后于 buffer（BufReadPost 重载 / 外部修改竞态），
+-- 节点 range 落在 buffer 之外时跳过，而不是让 nvim_buf_get_text 越界抛错。
+local function node_text(buf, node)
+  if not node then
+    return nil
+  end
+  local sr, sc, er, ec = node:range()
+  if sr < 0 or sc < 0 or er < sr or ec < 0 then
+    return nil
+  end
+  if er >= vim.api.nvim_buf_line_count(buf) then
+    return nil
+  end
+  local ok, text = pcall(vim.treesitter.get_node_text, node, buf)
+  if not ok then
+    return nil
+  end
+  return text
+end
+
 -- 找出范围内的 I18n 调用，返回 { {key=, row=, col=}, ... }
 -- col = 整个 call 结束位置（右括号之后），即虚拟文本插入点
 local function find_calls(buf, row_start, row_end)
@@ -215,7 +235,7 @@ local function find_calls(buf, row_start, row_end)
     local cap = q.captures[id]
     if cap == "method" then
       local r, c = node:start()
-      methods[#methods + 1] = { row = r, col = c, name = vim.treesitter.get_node_text(node, buf) }
+      methods[#methods + 1] = { row = r, col = c, name = node_text(buf, node) }
     elseif cap == "args" then
       args_nodes[#args_nodes + 1] = node
     end
@@ -240,15 +260,17 @@ local function find_calls(buf, row_start, row_end)
         end
       end
       if str then
-        local text = vim.treesitter.get_node_text(str, buf)
-        local key = unquote(text)
-        -- 跳过插值字符串（"#{x}.foo"）与空 key
-        if key and key ~= "" and not key:find("#{", 1, true) then
-          local parent = args:parent()
-          local _, ec = (parent or args):end_()
-          local sr, sc = str:start()
-          local _, ecol = str:end_()
-          out[#out + 1] = { key = key, row = ar, col = ec, srow = sr, scol = sc, ecol = ecol }
+        local text = node_text(buf, str)
+        if text then
+          local key = unquote(text)
+          -- 跳过插值字符串（"#{x}.foo"）与空 key
+          if key and key ~= "" and not key:find("#{", 1, true) then
+            local parent = args:parent()
+            local _, ec = (parent or args):end_()
+            local sr, sc = str:start()
+            local _, ecol = str:end_()
+            out[#out + 1] = { key = key, row = ar, col = ec, srow = sr, scol = sc, ecol = ecol }
+          end
         end
       end
     end
