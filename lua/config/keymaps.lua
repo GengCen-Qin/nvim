@@ -171,3 +171,26 @@ for _, lhs in ipairs({ "<C-/>", "<C-_>" }) do
   keymap("n", lhs, "gcc", { remap = true, desc = "Toggle comment line" })
   keymap("x", lhs, "gc", { remap = true, desc = "Toggle comment" })
 end
+
+-- 12. space + k + <1..3>: 按层级折叠 / 展开
+-- 依赖 options.lua 的 foldmethod=indent；折叠层级由 foldlevel 控制，数字越大展开越多
+for _, lvl in ipairs({ 1, 2, 3 }) do
+  keymap("n", "<leader>k" .. lvl, function()
+    vim.o.foldlevel = lvl
+    -- 折叠层级变化时同步刷新，否则若 showcmd 停在 0 附近会保留旧 fold column 状态
+    vim.cmd.normal({ "zx", bang = true })
+  end, { desc = "Fold to level " .. lvl })
+end
+
+-- 13. 功能键：直接复用已有键位，避免逻辑重复维护
+-- F1: lazygit（等价 <leader>gg，root 目录）
+if vim.fn.executable("lazygit") == 1 then
+  keymap("n", "<F1>", function()
+    Snacks.lazygit({ cwd = LazyVim.root.git() })
+  end, { desc = "Lazygit (Root Dir)" })
+end
+
+-- F2: 转发 <leader>bb（当前被 plugins/git-review.lua 覆盖为 Git Review）
+-- F3: 转发 <leader>fq（见 plugins/dadbod-schema.lua，新建 SQL buffer）
+keymap("n", "<F2>", "<leader>bb", { remap = true, desc = "Git Review" })
+keymap("n", "<F3>", "<leader>fq", { remap = true, desc = "DB: 新建 SQL buffer" })

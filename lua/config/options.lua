@@ -15,6 +15,13 @@ vim.opt.breakindentopt = "shift:2"
 -- 续行行首加一个标记 ↳，一眼看出是折行下来的
 vim.opt.showbreak = "↳ "
 
+-- 按缩进折叠（配合 keymaps.lua 的 <leader>k1/k2/k3 按层级折叠）
+vim.opt.foldmethod = "indent"
+-- 缩进 0/1 级也算一层，否则 Ruby 顶层 def/class 折叠层级会整体偏一级
+vim.opt.foldminlines = 1
+-- 打开文件时默认全部展开，需要折叠再按 <leader>k1/k2/k3
+vim.opt.foldlevel = 99
+
 -- 光标离窗口上下/左右边缘的留白（滚动到尽头时保留的余量行/列数）
 vim.opt.scrolloff = 8
 vim.opt.sidescrolloff = 8
