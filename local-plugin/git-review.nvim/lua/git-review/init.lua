@@ -172,11 +172,13 @@ local function current()
   m.block = nearest
   return m
 end
-local function hunk_patch(h, selected, reverse_worktree)
+-- postimage: build context from the '+' side of the diff, i.e. from the
+-- content the patch is applied against (index for unstage, worktree for discard).
+local function hunk_patch(h, selected, postimage)
   local out = {}
   local old_count, new_count = 0, 0
   local old_start, new_start = h.old_start, h.new_start
-  if reverse_worktree and selected then old_start = h.new_start end
+  if postimage and selected then old_start = h.new_start end
   local found = false
   for _, item in ipairs(h.lines) do
     local c = item.text:sub(1, 1)
@@ -189,7 +191,7 @@ local function hunk_patch(h, selected, reverse_worktree)
         out[#out + 1] = item.text
         old_count = old_count + 1
         found = true
-      elseif not reverse_worktree then
+      elseif not postimage then
         out[#out + 1] = ' ' .. item.text:sub(2)
         old_count, new_count = old_count + 1, new_count + 1
       end
@@ -198,7 +200,7 @@ local function hunk_patch(h, selected, reverse_worktree)
         out[#out + 1] = item.text
         new_count = new_count + 1
         found = true
-      elseif reverse_worktree then
+      elseif postimage then
         out[#out + 1] = ' ' .. item.text:sub(2)
         old_count, new_count = old_count + 1, new_count + 1
       end
@@ -208,11 +210,11 @@ local function hunk_patch(h, selected, reverse_worktree)
   local header = string.format('@@ -%d,%d +%d,%d @@', old_start, old_count, new_start, new_count)
   return header .. '\n' .. table.concat(out, '\n') .. '\n'
 end
-local function patch(m, whole, reverse_worktree)
+local function patch(m, whole, postimage)
   local out = vim.deepcopy(m.file.header_lines)
   for _, h in ipairs(m.file.hunks) do
     if whole or h == m.hunk then
-      local p = hunk_patch(h, whole and nil or m.block, reverse_worktree)
+      local p = hunk_patch(h, whole and nil or m.block, postimage)
       if p then out[#out + 1] = p:gsub('\n$', '') end
     end
   end
@@ -234,7 +236,10 @@ local function action(kind, whole)
   elseif kind == 'unstage' then
     args[#args + 1] = '--cached'; args[#args + 1] = '--reverse'
   else args[#args + 1] = '--reverse' end
-  local input = patch(m, whole, kind == 'discard' and not whole)
+  -- stage patches against the index (preimage); unstage/discard patch against
+  -- the applied target's current content (postimage), otherwise partial
+  -- hunks never match and every unstage/discard fails validation.
+  local input = patch(m, whole, kind ~= 'stage')
   local check_args = vim.deepcopy(args)
   table.insert(check_args, 2, '--check')
   local checked, check_err = git(check_args, input)
@@ -352,10 +357,41 @@ local function commit()
     end
   end)
 end
+-- Path of the file being edited (relative to the repo root) and the cursor line,
+-- so opening the review can land on that very change.
+local function source_position(root)
+  local name = vim.api.nvim_buf_get_name(0)
+  if name == '' or vim.bo.buftype ~= '' then return nil end
+  local file = vim.fn.fnamemodify(name, ':p')
+  if vim.fn.filereadable(file) ~= 1 then return nil end
+  local prefix = vim.fn.fnamemodify(root, ':p'):gsub('/+$', '') .. '/'
+  if file:sub(1, #prefix) ~= prefix then return nil end
+  return { file = file:sub(#prefix + 1), line = vim.fn.line('.') }
+end
+local function jump_to_source()
+  local jump = state.jump
+  if not jump or not state.meta then return end
+  -- Worktree line numbers match the unstaged diff; fall back to staged when
+  -- the file has no unstaged changes (index line numbers == worktree then).
+  for _, section in ipairs({ 'unstaged', 'staged' }) do
+    for _, m in pairs(state.meta) do
+      if m and m.section == section and m.hunk and m.file and m.file.path == jump.file then
+        for _, item in ipairs(m.hunk.lines) do
+          if item.new == jump.line and item.text:sub(1, 1) == '+' then
+            vim.api.nvim_win_set_cursor(0, { item.row, 0 })
+            vim.cmd('normal! zz')
+            return
+          end
+        end
+      end
+    end
+  end
+end
 function M.open()
   local root = vim.fn.systemlist({ 'git', 'rev-parse', '--show-toplevel' })[1]
   if vim.v.shell_error ~= 0 or not root then return warn('Not inside a Git repository') end
   state.root = root
+  state.jump = source_position(root)
   vim.cmd('enew')
   state.buf = vim.api.nvim_get_current_buf()
   vim.bo[state.buf].buftype = 'nofile'
@@ -388,5 +424,6 @@ function M.open()
   map('q', function() vim.cmd('bd!') end)
   for _, key in ipairs({ 'i', 'a', 'I', 'A', 'C', 'R' }) do map(key, function() end) end
   render()
+  jump_to_source()
 end
 return M
