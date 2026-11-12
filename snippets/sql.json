@@ -1,0 +1,6 @@
+{
+  "sc": {
+    "prefix": "sc",
+    "body": ["select count(*) from \"${1:table}\"$0"]
+  }
+}
