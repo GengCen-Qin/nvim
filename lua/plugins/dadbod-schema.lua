@@ -53,10 +53,10 @@
 -- 连接来自 vim.g.dbs（见 lua/config/options.lua）。
 -- 选中结果写入 XDG 数据目录，重启 nvim 后仍记住上次选的 connection。
 --
--- 本地(非TP)连接映射规则（local_conn_of）：tp_xxx -> xxx，
--- tp_pas_2/3/4 去掉 _数字 后缀落回 pas；本就是非TP则原样使用；
--- 映射不到则补全回退到选中连接并给出 WARN 提示。
--- 想直接查 TP 的结构（绕过映射）用 :DBTableSchema <连接名>。
+-- 本地连接映射规则（local_conn_of）：tp_xxx / v2_xxx -> 本地 xxx，
+-- 前缀后再去掉 _数字 后缀（tp_pas_2 -> pas、v2_pas_4 -> pas）；本就是
+-- 本地连接则原样使用；映射不到则补全回退到选中连接并给出 WARN 提示。
+-- 想直接查远端结构（绕过映射）用 :DBTableSchema <连接名>。
 return {
   {
     -- tpope/vim-dadbod 为纯 autoload 插件，常驻开销极小；
@@ -74,15 +74,17 @@ return {
         return conn and vim.g.dbs and vim.g.dbs[conn] or nil
       end
 
-      -- 连接名 -> 本地(非TP)连接名：tp_xxx -> 本地 xxx，tp_pas_2/3/4 去掉 _数字 落回 pas。
-      -- 本就是非TP则原样返回；映射不到返回 nil（调用方回退到原连接）。
+      -- 连接名 -> 本地连接名：tp_xxx / v2_xxx -> 本地 xxx（去掉前缀与 _数字，
+      -- 如 v2_pas_4 -> pas、tp_crm -> crm）。本就是本地连接则原样返回；
+      -- 映射不到返回 nil（调用方回退到原连接）。
+      -- 结构查看/补全始终走本地连接（约 0.04s），绕开直接查远端（约 3s）。
       local function local_conn_of(conn)
         if not (conn and vim.g.dbs) then
           return conn
         end
         local base = conn
-        if base:sub(1, 3) == "tp_" then
-          base = base:gsub("^tp_", ""):gsub("_%d+$", "")
+        if base:sub(1, 3) == "tp_" or base:sub(1, 3) == "v2_" then
+          base = base:gsub("^tp_", ""):gsub("^v2_", ""):gsub("_%d+$", "")
         end
         return vim.g.dbs[base] and base or nil
       end
@@ -363,25 +365,43 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
         f = "function", d = "procedure",
       }
 
-      -- 已知表名集合（每连接缓存一次），用于判断"这个表名已经打完整了"
+      -- 已知表名集合（每连接后台预载一次），用于判断"这个表名已经打完整了"。
+      -- 用异步 psql 预载：不走 vim-dadbod 的同步连接（db#connect 每次起一个 psql
+      -- 握手，远端库一次约 3s，会卡住打字）。加载完成前返回 false，等下一次防抖再判。
       local tables_cache = {}
+      local tables_loading = {}
       local function known_table(conn, name)
         local set = tables_cache[conn]
-        if not set then
-          local url = url_of(conn)
-          if not url then
-            return false
-          end
-          local ok, list = pcall(vim.fn["db#adapter#call"], url, "tables", { url }, {})
-          set = {}
-          if ok then
-            for _, n in ipairs(list or {}) do
-              set[n] = true
+        if set then
+          return set[name] == true
+        end
+        if tables_loading[conn] then
+          return false -- 加载中：本次先不判，下一次停手再查
+        end
+        local url = url_of(conn)
+        if not url then
+          tables_cache[conn] = {}
+          return false
+        end
+        tables_loading[conn] = true
+        vim.system({
+          "psql", "-w", "--no-psqlrc", "-tA", "--dbname=" .. url, "-c",
+          "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            .. "WHERE c.relkind IN ('r','p','v','m') AND n.nspname <> 'information_schema' "
+            .. "AND n.nspname !~ '^pg_'",
+        }, { text = true }, function(res)
+          local set = {}
+          if type(res) == "table" and res.code == 0 then
+            for _, line in ipairs(vim.split(res.stdout or "", "\n")) do
+              line = vim.trim(line)
+              if line ~= "" then
+                set[line] = true
+              end
             end
           end
           tables_cache[conn] = set
-        end
-        return set[name] == true
+        end)
+        return false
       end
 
       local function lookup_object(conn, name)
@@ -758,9 +778,9 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
           return best_name
         end
 
-        -- 表切换时才更新 b:db_table 并触发 dadbod 拉该表字段（补全焦点化）。
-        -- 必须防抖 + 校验表名有效：否则边打 "pas_sleeve_accts" 会每个前缀都触发一次
-        -- fetch（每次约 300ms 且内含一次连库校验），卡到没法打字。
+        -- 表切换时才更新 b:db_table（补全焦点化：无表名前缀时优先补当前表字段）。
+        -- 必须防抖 + 校验表名有效：否则边打 "pas_sleeve_accts" 会每个前缀都触发一次，
+        -- 卡到没法打字。
         vim.b[buf].db_table = nil
         vim.b[buf]._db_tracked_table = ""
 
@@ -798,12 +818,11 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
             end
             vim.b[buf]._db_tracked_table = tbl
             vim.b[buf].db_table = tbl
-            -- 同步给 dadbod-completion（它的 buf.table 只在 fetch 时刷新）
-            pcall(vim.fn["vim_dadbod_completion#fetch"], buf)
-            -- 预取该表字段：dadbod 是按需异步拉的，先踢一次，
-            -- 等用户写到 where 时字段已就绪（否则第一次补不出字段）
-            pcall(vim.fn["vim_dadbod_completion#omni"], 0, "_db_prefetch_")
-            vim.notify("当前表: " .. tbl .. "（已准备字段补全）", vim.log.levels.INFO, {
+            -- 只更新跟踪状态，不调 vim_dadbod_completion#fetch / omni：
+            -- dadbod 的 fetch 每次都同步跑一次 db#connect（psql 握手）确认连接，
+            -- 且不走缓存，远程库一次约 3s，边打表名就会卡住主循环。
+            -- 字段列由 dadbod 在真正命中补全时按需异步拉取，b:db_table 已就位即可。
+            vim.notify("当前表: " .. tbl, vim.log.levels.INFO, {
               title = "DB",
             })
           end))
