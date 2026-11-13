@@ -224,6 +224,11 @@ return {
         vim.bo[buf].swapfile = false
         vim.bo[buf].filetype = ft or "sql"
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        -- large results: treesitter highlight is a sync whole-tree query and would freeze the UI
+        if vim.api.nvim_buf_line_count(buf) > 500
+            or vim.api.nvim_buf_get_offset(buf, -1) > 100000 then
+          pcall(vim.treesitter.stop, buf)
+        end
         vim.bo[buf].modifiable = false -- 纯展示，防误改/防自动保存
         pcall(vim.api.nvim_buf_set_name, buf, "db-float://" .. title)
         local win = vim.api.nvim_open_win(buf, true, {
