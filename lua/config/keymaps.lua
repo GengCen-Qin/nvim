@@ -194,3 +194,15 @@ end
 -- F3: 转发 <leader>fq（见 plugins/dadbod-schema.lua，新建 SQL buffer）
 keymap("n", "<F2>", "<leader>bb", { remap = true, desc = "Git Review" })
 keymap("n", "<F3>", "<leader>fq", { remap = true, desc = "DB: 新建 SQL buffer" })
+
+-- 14. 鼠标左键点击：点击这一瞬间临时关掉 scrolloff，避免视口被顶动
+-- nvim 的行为：光标落到距窗口上/下边缘 scrolloff 行内时会把文本滚一下（:h gui.txt 原文
+-- "If 'scrolloff' is set, and the cursor is positioned within 'scrolloff' lines from the
+-- window border, the text is scrolled"）。这份留白是给键盘移动用的，鼠标点哪儿就该停在哪儿。
+-- feedkeys 用 "nx"：n 防止重入本映射，x 让点击立即执行，保证还原发生在点击之后。
+keymap("n", "<LeftMouse>", function()
+  local so, siso = vim.o.scrolloff, vim.o.sidescrolloff
+  vim.o.scrolloff, vim.o.sidescrolloff = 0, 0
+  vim.api.nvim_feedkeys(vim.keycode("<LeftMouse>"), "nx", false)
+  vim.o.scrolloff, vim.o.sidescrolloff = so, siso
+end, { desc = "Mouse click without scrolloff jump" })
