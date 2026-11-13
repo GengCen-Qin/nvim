@@ -139,7 +139,7 @@ function M.preview(ctx)
   ctx.preview:highlight({ ft = "git" })
 end
 
----在独立 scratch buffer 打开某次提交的完整 view + diff（git show <commit>）
+---在独立常驻 buffer 打开某次提交的完整 view + diff（git show <commit>）
 ---@param item snacks.picker.finder.Item
 local function open_commit_diff(item)
   local out = vim.system(
@@ -150,19 +150,17 @@ local function open_commit_diff(item)
     Snacks.notify.warn(vim.trim(out.stderr or "git show 执行失败"), { title = "Git Line History" })
     return
   end
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(out.stdout, "\n", { plain = true }))
-  -- 同一个 commit 会被反复查看，buffer 名不能重复（E95），重名时加序号
   local base = ("git show %s"):format(item.commit)
-  local name, n = base, 1
-  while vim.fn.bufnr(name) ~= -1 do
-    n = n + 1
-    name = ("%s (%d)"):format(base, n)
+  -- 常驻且 listed：切走不消失、tab 栏可见，仅 :bd 时清除；已打开过则复用
+  local buf = vim.fn.bufnr(base)
+  if buf == -1 then
+    buf = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(out.stdout, "\n", { plain = true }))
+    vim.api.nvim_buf_set_name(buf, base)
+    vim.bo[buf].buftype = "nofile"
+    vim.bo[buf].modifiable = false
+    vim.bo[buf].filetype = "git"
   end
-  vim.api.nvim_buf_set_name(buf, name)
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].filetype = "git"
   vim.api.nvim_win_set_buf(0, buf)
 end
 
