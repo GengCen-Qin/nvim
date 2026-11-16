@@ -5,7 +5,9 @@
 return {
   {
     "lewis6991/gitsigns.nvim",
-    event = "LazyFile",
+    -- Once a BufReadPre, this costs ~45ms inside startup; VeryLazy still fires right
+    -- after UIEnter, so signs are a frame later but no longer on the critical path.
+    event = "VeryLazy",
     opts = function(_, opts)
       opts.on_attach = function(buffer)
         local gs = package.loaded.gitsigns
