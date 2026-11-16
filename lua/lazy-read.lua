@@ -99,32 +99,57 @@ end
 --
 -- 注释里的 file_path 仍是绝对路径（与 Sublime 版共用、可读性好），repo_key 只是
 -- 额外的匹配键；Sublime 版读到不认识的字段会原样保留，不受影响。
-local repo_cache = {}
+local repo_cache = {} -- dir -> { common, root } | false（false = 不是 git 仓库）
 
--- 返回 { common = git 公共目录, root = 本 worktree 根 }；不在 git 仓库里则 false
+-- 只读文件系统推仓库归属，不 fork git：WSL2 里 spawn 一个进程本身就要 ~50ms
+-- （fork 整个 nvim），比 git 命令本身还贵。规则与 rev-parse 一致：
+--   * 普通仓库：.git 是目录 -> common = 该目录，root = 它所在目录
+--   * worktree：.git 是文件，内容 "gitdir: <common>/worktrees/<名字>" -> common 取其前缀
+local function repo_walk(dir)
+  local p = dir
+  for _ = 1, 40 do
+    local dot_git = p .. "/.git"
+    local st = vim.uv.fs_stat(dot_git)
+    if st then
+      -- 空的 .git 目录不算仓库（残留目录），git 也会继续往上找
+      if st.type == "directory" and vim.uv.fs_stat(dot_git .. "/HEAD") then
+        return { common = dot_git, root = p .. "/" }
+      end
+      if st.type == "file" then
+        local f = io.open(dot_git, "r")
+        if f then
+          local line = f:read("*l")
+          f:close()
+          local gitdir = line and line:match("^gitdir:%s*(.+)$")
+          if gitdir then
+            if gitdir:sub(1, 1) ~= "/" then
+              gitdir = vim.fn.fnamemodify(p .. "/" .. gitdir, ":p"):gsub("/+$", "")
+            end
+            if vim.uv.fs_stat(gitdir) then
+              return { common = gitdir:match("^(.*)/worktrees/[^/]+$") or gitdir, root = p .. "/" }
+            end
+          end
+        end
+      end
+    end
+    local parent = vim.fn.fnamemodify(p, ":h")
+    if parent == p or parent == "" then
+      break
+    end
+    p = parent
+  end
+  return false
+end
+
+-- 返回 { common = git 公共目录, root = 本 worktree 根 }；不在 git 仓库里返回 nil
 local function repo_of(path)
   local dir = vim.fn.fnamemodify(path, ":h")
   local cached = repo_cache[dir]
-  if cached ~= nil then
-    return cached
+  if cached == nil then
+    cached = repo_walk(dir)
+    repo_cache[dir] = cached
   end
-
-  local function git(arg)
-    local out = vim.fn.systemlist({ "git", "-C", dir, "rev-parse", "--path-format=absolute", arg })
-    if vim.v.shell_error ~= 0 or #out == 0 then
-      return nil
-    end
-    return out[1]
-  end
-
-  local common, root = git("--git-common-dir"), git("--show-toplevel")
-  local info = false
-  if common and root then
-    local c = vim.fn.fnamemodify(common, ":p"):gsub("/+$", "")
-    info = { common = c, root = vim.fn.fnamemodify(root, ":p") }
-  end
-  repo_cache[dir] = info
-  return info
+  return cached or nil
 end
 
 -- "git公共目录|仓库内相对路径"，不在 git 仓库里返回 nil
@@ -171,6 +196,10 @@ end
 
 local cache = { mtime = nil, data = nil, broken = false }
 
+-- 注释里的 file_path 是随 notes.json 稳定的，规范化一次即可复用（每次刷新 82 条
+-- 全量 expand+fnamemodify 要 ~24ms）；notes.json 变了就整表丢掉重建。
+local note_path_cache = {}
+
 local function file_mtime()
   local st = vim.uv.fs_stat(NOTES_PATH)
   if not st then
@@ -213,6 +242,7 @@ local function load_data()
 
   cache.mtime = mtime
   cache.data = data
+  note_path_cache = {}
   return data
 end
 
@@ -314,12 +344,27 @@ local function line_text(buf, row)
   return vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1]
 end
 
+local function note_path(note)
+  local raw = note.file_path or ""
+  local p = note_path_cache[raw]
+  if p == nil then
+    -- 绝大多数是干净的绝对路径，to_local_path 的结果与 normalize_path 一致，
+    -- 省掉每条一次 expand+fnamemodify（82 条合计 ~12ms）；不规范才回退。
+    p = to_local_path(raw)
+    if p == "" or p:sub(1, 1) ~= "/" or p:find("//", 1, true) or p:find("/./", 1, true) or p:find("/../", 1, true) then
+      p = normalize_path(raw)
+    end
+    note_path_cache[raw] = p
+  end
+  return p
+end
+
 local function notes_for_file(path, data)
   local out = {}
   local target = normalize_path(path)
   local target_key = repo_key(target)
   for _, note in ipairs(data.notes or {}) do
-    if normalize_path(note.file_path or "") == target then
+    if note_path(note) == target then
       out[#out + 1] = note
     elseif target_key ~= nil and note.repo_key == target_key then
       -- 同一个仓库的另一个 worktree 上写的注释（公共代码），这里也命中
@@ -327,34 +372,6 @@ local function notes_for_file(path, data)
     end
   end
   return out
-end
-
--- 老注释没有 repo_key：文件还在的话补算一次并落盘，之后就能跨 worktree 共享。
--- 每个会话只跑一次，git 结果按目录缓存，代价可忽略。
-local migrated_repo_keys = false
-local function migrate_repo_keys()
-  if migrated_repo_keys then
-    return
-  end
-  migrated_repo_keys = true
-
-  local data = load_data()
-  local changed = false
-  for _, note in ipairs(data.notes or {}) do
-    if note.repo_key == nil then
-      local file = to_local_path(note.file_path or "")
-      if file ~= "" and vim.fn.filereadable(file) == 1 then
-        local key = repo_key(file)
-        if key then
-          note.repo_key = key
-          changed = true
-        end
-      end
-    end
-  end
-  if changed then
-    save_data(data)
-  end
 end
 
 local function find_note(data, id)
@@ -456,8 +473,6 @@ function M.refresh(buf)
   if not vim.api.nvim_buf_is_valid(buf) then
     return
   end
-
-  migrate_repo_keys()
 
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
 
