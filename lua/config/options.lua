@@ -32,6 +32,10 @@ vim.opt.sidescrolloff = 8
 -- 数据库补全交给 vim-dadbod-completion/blink）。
 vim.g.omni_sql_no_default_maps = true
 
+-- Disable the Ruby provider: $VIMRUNTIME/ftplugin/ruby.vim sources it on every Ruby
+-- buffer (~55ms), and nothing here uses :ruby / :rubyeval / rubycomplete.
+vim.g.loaded_ruby_provider = 0
+
 -- 数据库连接（vim-dadbod / vim-dadbod-ui）
 -- 格式: postgresql://user:password@host:port/database
 -- 密码中的特殊字符需百分号编码（+ -> %2B, * -> %2A）
