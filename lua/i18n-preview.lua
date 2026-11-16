@@ -307,15 +307,21 @@ function M.refresh(buf, win)
   if not root then
     return
   end
-  local data = load_data(root)
-  if not data then
-    return
-  end
-
   local row_start, row_end = 0, -1
   if M.opts.viewport_only and vim.api.nvim_win_is_valid(win) then
     row_start = math.max(0, vim.fn.line("w0", win) - 1)
     row_end = vim.fn.line("w$", win)
+  end
+
+  -- 先扫调用点：没有 I18n.t 的文件（Gemfile/model/绝大多数 .rb）就此返回，
+  -- 不必为它解码几 MB 的 locale 缓存。
+  local calls = find_calls(buf, row_start, row_end)
+  if #calls == 0 then
+    return
+  end
+  local data = load_data(root)
+  if not data then
+    return
   end
 
   -- 光标所在行不渲染 -> 恢复原样
@@ -324,7 +330,7 @@ function M.refresh(buf, win)
     cursor_row = vim.api.nvim_win_get_cursor(win)[1] - 1
   end
 
-  for _, c in ipairs(find_calls(buf, row_start, row_end)) do
+  for _, c in ipairs(calls) do
     if c.row ~= cursor_row then
       local text = lookup(data, M.opts.locale, c.key)
       if text then
