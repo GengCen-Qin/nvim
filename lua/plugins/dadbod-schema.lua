@@ -179,13 +179,26 @@ return {
           vim.notify("vim.g.dbs 为空，请先配置连接", vim.log.levels.ERROR)
           return
         end
+        -- 上次选中的连接排到第一位：vim.ui.select 原生实现是编号列表，
+        -- 没有「默认选中项」参数；排第一 = 回车即选中，也兼容 picker 实现。
+        local current = load_saved()
+        if current then
+          for i, name in ipairs(names) do
+            if name == current then
+              if i > 1 then
+                table.insert(names, 1, table.remove(names, i))
+              end
+              break
+            end
+          end
+        end
         vim.ui.select(names, {
           prompt = "选择数据库连接",
           format_item = function(name)
             local url = url_of(name)
             -- 隐去密码，仅展示 user@host/database
             local pretty = url and url:gsub("://([^:]+):[^@]*@", "://%1@") or ""
-            return string.format("%-9s %s", name, pretty)
+            return string.format("%s%-9s %s", name == current and "* " or "  ", name, pretty)
           end,
         }, function(choice)
           if choice then
@@ -824,10 +837,17 @@ ORDER BY a.attnum]], table.concat(sel, ",\n       "), fqn)
             end
             vim.b[buf]._db_tracked_table = tbl
             vim.b[buf].db_table = tbl
-            -- 只更新跟踪状态，不调 vim_dadbod_completion#fetch / omni：
-            -- dadbod 的 fetch 每次都同步跑一次 db#connect（psql 握手）确认连接，
-            -- 且不走缓存，远程库一次约 3s，边打表名就会卡住主循环。
-            -- 字段列由 dadbod 在真正命中补全时按需异步拉取，b:db_table 已就位即可。
+            -- 预热列缓存：dadbod 首次命中补全时才异步拉列，第一次必然返回空。
+            -- 空 base 会在 omni 入口直接 return，必须给个非空前缀才会走到
+            -- fetch + 拉列；本地连接约 0.3s，每个 buffer 每张表只做一次。
+            if vim.b[buf]._db_warmed_table ~= tbl then
+              vim.b[buf]._db_warmed_table = tbl
+              if vim.api.nvim_get_current_buf() == buf then
+                pcall(vim.fn["vim_dadbod_completion#omni"], 0, "x")
+              end
+            end
+            -- 不额外调 fetch：omni 内部已按需 fetch，且 fetch 每次都会同步跑一次
+            -- db#connect（psql 握手），远程库一次约 3s，不能边打表名反复触发。
             vim.notify("当前表: " .. tbl, vim.log.levels.INFO, {
               title = "DB",
             })
