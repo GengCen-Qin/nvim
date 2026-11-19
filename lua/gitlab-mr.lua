@@ -12,6 +12,7 @@
 -- 当前分支不是 MR 的 source 分支时会提示行号可能对不上，但照常打开本地文件。
 -- 列表里已合并 / 已关闭的标 [merged] / [closed]，草稿标 [draft]；
 -- 未合并且有冲突的（has_conflicts）整行标红并加 [conflict]，一眼能看出哪个要处理。
+-- 列表里按 <C-e> 切换选中 MR 的 draft 状态（draft ↔ ready），成功后原地刷新该行。
 --
 -- 实现要点：
 --   * 只跑一次 `glab mr list -F json`，列表和预览都从这份 JSON 渲染。预览不额外
@@ -456,6 +457,50 @@ function M.open_diff(item)
 end
 
 ----------------------------------------------------------------------
+-- draft 切换
+----------------------------------------------------------------------
+
+---把 MR 的 draft 状态翻过来：draft → ready，ready → draft。
+---只对 open 的 MR 有意义（已合并/已关闭的改不了）。成功后改本地字段并刷新列表。
+---@param picker snacks.picker|nil
+---@param item table|nil
+function M.toggle_draft(picker, item)
+  local mr = item and item.mr
+  if not mr then
+    return
+  end
+  if mr.state ~= "opened" then
+    return notify(
+      ("!%d 已是 %s，draft 状态只对 open 的 MR 有效"):format(mr.iid, state_text(mr.state)),
+      vim.log.levels.WARN
+    )
+  end
+  local root = git_root()
+  if not root then
+    return notify("当前不在 git 仓库里", vim.log.levels.WARN)
+  end
+
+  local to_draft = not mr.draft
+  spinner_start(("%s !%d ..."):format(to_draft and "marking draft" or "marking ready", mr.iid))
+  glab({ "mr", "update", tostring(mr.iid), to_draft and "--draft" or "--ready" }, root, function(out)
+    spinner_stop()
+    if out.code ~= 0 then
+      return notify(
+        ("!%d 切换 draft 失败: %s"):format(mr.iid, vim.trim(out.stderr or out.stdout or "")),
+        vim.log.levels.ERROR
+      )
+    end
+    -- 改的是远端：把本地字段翻过来重渲染即可，不用重新拉整个列表
+    mr.draft = to_draft
+    item.detail = render_view(mr)
+    if picker and not picker.closed then
+      picker:refresh()
+    end
+    notify(("!%d %s"):format(mr.iid, to_draft and "已标为 draft" or "已取消 draft"))
+  end)
+end
+
+----------------------------------------------------------------------
 -- 取数
 ----------------------------------------------------------------------
 
@@ -529,6 +574,12 @@ function M.open(opts)
       items = items,
       format = format_item,
       preview = M.preview,
+      -- <C-e>：把选中 MR 的 draft 状态翻过来（不动光标、不关 picker）
+      actions = { toggle_draft = M.toggle_draft },
+      win = {
+        input = { keys = { ["<C-e>"] = { "toggle_draft", mode = { "i", "n" }, desc = "toggle draft" } } },
+        list = { keys = { ["<C-e>"] = { "toggle_draft", mode = { "n" }, desc = "toggle draft" } } },
+      },
       confirm = function(picker, item)
         picker:close()
         if item then
