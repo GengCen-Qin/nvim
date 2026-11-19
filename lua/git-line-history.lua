@@ -4,7 +4,7 @@
 -- 列出影响该行区间的全部提交；预览只展示该提交对这几行的改动（而不是整个提交），
 -- 回车在独立 buffer 打开该提交的完整 view + diff。
 --
--- 列表每行：修改人 → jira 编号 → 提交信息 → 日期 → commit。
+-- 列表每行：日期 → 修改人 → jira 编号 → 提交信息 → commit。
 --
 -- 原理：`git log -p -L <start>,<end>:<file>` 一次拿到该行区间的全部提交，
 -- 每个提交后面跟着的 patch 就是 git 从当前版本追踪出来的、恰好覆盖这几行的改动。
@@ -96,9 +96,9 @@ local function split_jira(msg)
   return jira, msg
 end
 
-local AUTHOR_WIDTH, JIRA_WIDTH = 16, 11
+local DATE_WIDTH, AUTHOR_WIDTH, JIRA_WIDTH = 10, 16, 11
 
----列表展示：修改人放最前，紧跟 jira 编号，然后是提交信息、日期、commit
+---列表展示：日期放最前，然后是修改人、jira 编号、提交信息、commit
 ---@param item snacks.picker.finder.Item
 ---@param picker snacks.picker
 ---@return snacks.picker.Highlight[]
@@ -106,15 +106,13 @@ function M.format(item, picker)
   local a = Snacks.picker.util.align
   local jira, msg = split_jira(item.msg or "")
   local ret = {} ---@type snacks.picker.Highlight[]
-  ret[#ret + 1] = { picker.opts.icons.git.commit, "SnacksPickerGitCommit" }
+  ret[#ret + 1] = { a(item.date or "", DATE_WIDTH), "SnacksPickerGitDate" }
+  ret[#ret + 1] = { " " }
   ret[#ret + 1] = { a(item.author or "", AUTHOR_WIDTH, { truncate = true }), "SnacksPickerGitAuthor" }
   ret[#ret + 1] = { " " }
   ret[#ret + 1] = { a(jira or "", JIRA_WIDTH), "SnacksPickerGitIssue" }
   ret[#ret + 1] = { " " }
   Snacks.picker.highlight.extend(ret, require("snacks.picker.format").commit_message({ msg = msg }, picker))
-  if item.date then
-    ret[#ret + 1] = { " " .. item.date, "SnacksPickerGitDate" }
-  end
   ret[#ret + 1] = { " " .. item.commit, "SnacksPickerGitCommit" }
   return ret
 end
